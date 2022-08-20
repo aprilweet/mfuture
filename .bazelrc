@@ -1,0 +1,5 @@
+build --cxxopt=-std=c++17
+
+# LD_PRELOAD=/usr/lib64/libasan.so.4
+# build --copt=-fsanitize=address
+# build --linkopt=-fsanitize=address
