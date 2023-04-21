@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cassert>
+#include <cstddef>
 #include <exception>
 #include <functional>
 #include <tuple>
@@ -59,31 +61,45 @@ class FutureState {
   FutureState(MakeReadyFutureTag, U &&...value)
       : state_(State::kValue), value_(std::forward<U>(value)...) {}
 
-  FutureState(MakeExceptionalFutureTag, std::exception_ptr exception)
-      : state_(State::kException), exception_(exception) {}
+  FutureState(MakeExceptionalFutureTag, std::exception_ptr &&exception)
+      : state_(State::kException) {
+    new (exception_.data()) std::exception_ptr(std::move(exception));
+  }
 
   FutureState(FutureState &&other) { MoveFrom(std::move(other)); }
 
+  ~FutureState() { assert(!Available()); }
+
   FutureState &operator=(FutureState &&other) {
-    if (this != &other) MoveFrom(std::move(other));
+    if (this != &other) {
+      assert(Empty());
+      MoveFrom(std::move(other));
+    }
     return *this;
   }
 
-  void Reset() { state_ = State::kEmpty; }
+  void Reset() {
+    assert(!Available());
+    state_ = State::kEmpty;
+  }
 
   void SetValue(std::tuple<T...> &&value) {
+    assert(Empty());
     value_ = std::move(value);
     state_ = State::kValue;
   }
 
   template <class... U>
   void SetValue(U &&...value) {
+    assert(Empty());
     value_ = std::make_tuple(std::move(value)...);
     state_ = State::kValue;
   }
 
-  void SetException(std::exception_ptr exception) {
-    exception_ = exception;
+  void SetException(std::exception_ptr &&exception) {
+    assert(Empty());
+
+    new (exception_.data()) std::exception_ptr(std::move(exception));
     state_ = State::kException;
   }
 
@@ -97,20 +113,28 @@ class FutureState {
 
   std::tuple<T...> &&Value() && {
     assert(Ready());
+    state_ = State::kInvalid;
     return std::move(value_);
   }
 
-  std::tuple<T...> &Value() & {
-    assert(Ready());
-    return value_;
-  }
-
-  std::exception_ptr Exception() {
+  std::exception_ptr Exception() && {
     assert(Failed());
-    return exception_;
+    auto e = ExceptionRef();
+#ifndef __GLIBCXX__
+    // A moved std::exception_ptr might be different from an empty one, so
+    // destruction is still neccessary.
+    ExceptionRef().~exception_ptr();
+#endif
+    state_ = State::kInvalid;
+    return e;
   }
 
  private:
+  std::exception_ptr &&ExceptionRef() {
+    auto p = reinterpret_cast<std::exception_ptr *>(exception_.data());
+    return std::move(*p);
+  }
+
   void MoveFrom(FutureState &&other) {
     state_ = std::exchange(other.state_, State::kInvalid);
     switch (state_) {
@@ -118,7 +142,10 @@ class FutureState {
         value_ = std::move(other.value_);
         break;
       case State::kException:
-        exception_ = std::exchange(other.exception_, nullptr);
+        new (exception_.data()) std::exception_ptr(other.ExceptionRef());
+#ifndef __GLIBCXX__
+        other.ExceptionRef().~exception_ptr();
+#endif
         break;
       default:
         break;
@@ -128,9 +155,6 @@ class FutureState {
   FutureState(const FutureState &) = delete;
   FutureState &operator=(const FutureState &) = delete;
 
-  friend class Promise<T...>;
-  friend class Future<T...>;
-
  private:
   enum class State {
     kEmpty,
@@ -138,8 +162,16 @@ class FutureState {
     kException,
     kInvalid
   } state_{State::kEmpty};
+
   std::tuple<T...> value_;
-  std::exception_ptr exception_;
+
+  // C++ destructor always destroys their members. However, for an empty
+  // std::exception_ptr, it's unnecessary and heavy (it's defined by c++ runtime
+  // library, which might prevent compiler to further optimize), so we try to
+  // avoid its destruction. Actually after this optimization, compilers are able
+  // to archive zero-cost for ready futures.
+  alignas(std::exception_ptr)
+      std::array<std::byte, sizeof(std::exception_ptr)> exception_;
 };
 
 struct ContinuationBase {
@@ -165,7 +197,7 @@ struct Continuation : public ContinuationBase {
 
 // Perhaps users also need this function.
 template <typename FutureType>
-FutureType MakeExceptionalFuture(std::exception_ptr exception) {
+FutureType MakeExceptionalFuture(std::exception_ptr &&exception) {
   return FutureType(details::MakeExceptionalFutureTag{}, std::move(exception));
 }
 
@@ -183,7 +215,7 @@ Future<T...> MakeReadyFuture(U &&...val) {
 }
 
 template <typename... T>
-Future<T...> MakeExceptionalFuture(std::exception_ptr exception) {
+Future<T...> MakeExceptionalFuture(std::exception_ptr &&exception) {
   return Future<T...>(details::MakeExceptionalFutureTag{},
                       std::move(exception));
 }
@@ -223,7 +255,7 @@ class Future {
       return FuturizeApply(std::forward<Callback>(callback),
                            std::move(state_).Value());
     } else if (state_.Failed()) {
-      return details::MakeExceptionalFuture<FR>(state_.Exception());
+      return details::MakeExceptionalFuture<FR>(std::move(state_).Exception());
     } else {
       assert(promise_);
       assert(!promise_->continuation_);
@@ -301,11 +333,13 @@ class Future {
   std::tuple<T...> &&Value() { return std::move(state_).Value(); }
 
   template <size_t Index>
-  auto Value() {
+  auto &&Value() {
     return std::get<Index>(Value());
   }
 
-  std::exception_ptr Exception() { return state_.Exception(); }
+  std::exception_ptr Exception() {
+    return std::move(state_).Exception();  // NRVO?
+  }
 
  private:
   friend class Promise<T...>;
@@ -317,17 +351,17 @@ class Future {
   friend Future<U...> MakeReadyFuture(V &&...);
 
   template <typename... U>
-  friend Future<U...> MakeExceptionalFuture(std::exception_ptr);
+  friend Future<U...> MakeExceptionalFuture(std::exception_ptr &&);
 
   template <typename FutureType>
-  friend FutureType details::MakeExceptionalFuture(std::exception_ptr);
+  friend FutureType details::MakeExceptionalFuture(std::exception_ptr &&);
 
   template <typename... U>
   Future(details::MakeReadyFutureTag tag, U &&...val)
       : state_(tag, std::move(val)...), promise_(nullptr) {}
 
-  Future(details::MakeExceptionalFutureTag tag, std::exception_ptr exception)
-      : state_(tag, exception), promise_(nullptr) {}
+  Future(details::MakeExceptionalFutureTag tag, std::exception_ptr &&exception)
+      : state_(tag, std::move(exception)), promise_(nullptr) {}
 
   Future(Promise<T...> *promise)
       : state_(std::move(*(promise->p_state_))), promise_(promise) {
@@ -369,7 +403,7 @@ class Future {
     if (state_.Ready()) {
       promise.SetValue(std::move(state_).Value());
     } else if (state_.Failed()) {
-      promise.SetException(state_.Exception());
+      promise.SetException(std::move(state_).Exception());
     } else {
       assert(promise_);
       *promise_ = std::move(promise);
@@ -425,13 +459,13 @@ class Promise {
     }
   }
 
-  void SetException(std::exception_ptr exception) {
+  void SetException(std::exception_ptr &&exception) {
     // In case that the counterpart Future has been destructed, such as the ones
     // returned by Then() abandoned by user.
     if (!p_state_) return;
 
     assert(p_state_->Empty());
-    p_state_->SetException(exception);
+    p_state_->SetException(std::move(exception));
 
     // Clear the continuation member before scheduling, because this promise
     // might be destructed before the continuation is done.
