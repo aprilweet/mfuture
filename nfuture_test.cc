@@ -48,26 +48,21 @@ TEST(Future, basic1) {
     EXPECT_TRUE(future.Value<0>());
   }
   {
-    auto future =
-        MakeExceptionalFuture<>(std::make_exception_ptr("error")).Then([&]() {
-          // Never reach here.
-          ++counter;
-          return true;
-        });
-
-    EXPECT_TRUE(future.Failed());
-    EXPECT_THROW(std::rethrow_exception(future.Exception()), const char *);
-    // FutureState is not moved, so we can still access it.
-
-    // FIXME(quintonwang): What's the type of ThenWrap?
-    auto future2 = future.ThenWrap([&](Future<bool> &&ft) {
-      EXPECT_TRUE(ft.Failed());
-      EXPECT_THROW(std::rethrow_exception(ft.Exception()), const char *);
-      ++counter;
-      return true;
-    });
-    EXPECT_TRUE(future2.Ready());
-    EXPECT_TRUE(future2.Value<0>());
+    auto future = MakeExceptionalFuture<>(std::make_exception_ptr("error"))
+                      .Then([&]() {
+                        // Never reach here.
+                        ++counter;
+                        return true;
+                      })
+                      .ThenWrap([&](Future<bool> &&ft) {
+                        EXPECT_TRUE(ft.Failed());
+                        EXPECT_THROW(std::rethrow_exception(ft.Exception()),
+                                     const char *);
+                        ++counter;
+                        return true;
+                      });
+    EXPECT_TRUE(future.Ready());
+    EXPECT_TRUE(future.Value<0>());
   }
 
   ASSERT_EQ(counter, 5);
@@ -175,6 +170,7 @@ TEST(perf, mark) {
 
 TEST(perf, ready) {
   int counter = 0;
+  // This should be optimized to NOOP.
   auto future = DoUntil([n = kTimes]() mutable { return n-- == 0; },
                         [&]() {
                           ++counter;

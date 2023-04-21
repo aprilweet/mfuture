@@ -57,89 +57,124 @@ class FutureState {
 
   template <class... U>
   FutureState(MakeReadyFutureTag, U &&...value)
-      : state_(State::kValue), value_(std::forward<U>(value)...) {}
+      : estate_(EState::kValue), value_(std::forward<U>(value)...) {}
 
-  FutureState(MakeExceptionalFutureTag, std::exception_ptr exception)
-      : state_(State::kException), exception_(exception) {}
+  FutureState(MakeExceptionalFutureTag, std::exception_ptr &&exception)
+      : estate_(std::move(exception)) {}
 
-  FutureState(FutureState &&other) { MoveFrom(std::move(other)); }
+  FutureState(FutureState &&other)
+      : estate_(std::move(other.estate_)), value_(std::move(other.value_)) {}
 
   FutureState &operator=(FutureState &&other) {
-    if (this != &other) MoveFrom(std::move(other));
+    if (this != &other) {
+      estate_ = std::move(other.estate_);
+      if (Ready()) value_ = std::move(other.value_);
+    }
     return *this;
   }
 
-  void Reset() { state_ = State::kEmpty; }
+  bool Empty() const { return estate_.state_ == EState::kEmpty; }
+  bool Ready() const { return estate_.state_ == EState::kValue; }
+  bool Failed() const { return estate_.state_ >= EState::kExceptionMin; }
+  bool Available() const { return Ready() || Failed(); }
+
+  void Reset() {
+    assert(!Failed());
+    estate_.state_ = EState::kEmpty;
+  }
+
+  void SetInvalid() { estate_.state_ = EState::kInvalid; }
 
   void SetValue(std::tuple<T...> &&value) {
+    assert(Empty());
     value_ = std::move(value);
-    state_ = State::kValue;
+    estate_.state_ = EState::kValue;
   }
 
   template <class... U>
   void SetValue(U &&...value) {
+    assert(Empty());
     value_ = std::make_tuple(std::move(value)...);
-    state_ = State::kValue;
+    estate_.state_ = EState::kValue;
   }
-
-  void SetException(std::exception_ptr exception) {
-    exception_ = exception;
-    state_ = State::kException;
-  }
-
-  void SetInvalid() { state_ = State::kInvalid; }
-
-  bool Valid() const { return state_ != State::kInvalid; }
-  bool Empty() const { return state_ == State::kEmpty; }
-  bool Ready() const { return state_ == State::kValue; }
-  bool Failed() const { return state_ == State::kException; }
-  bool Available() const { return Ready() || Failed(); }
 
   std::tuple<T...> &&Value() && {
     assert(Ready());
+    estate_.state_ = EState::kInvalid;
     return std::move(value_);
   }
 
-  std::tuple<T...> &Value() & {
-    assert(Ready());
-    return value_;
+  void SetException(std::exception_ptr &&exception) {
+    assert(Empty());
+    new (&estate_.exception_) std::exception_ptr(std::move(exception));
+    assert(Failed());
   }
 
-  std::exception_ptr Exception() {
+  std::exception_ptr Exception() && {
     assert(Failed());
-    return exception_;
+    auto e = std::move(estate_.exception_);
+#ifndef __GLIBCXX__
+    estate_.exception_.~exception_ptr();
+#endif
+    estate_.state_ = EState::kInvalid;
+    return e;
   }
 
  private:
-  void MoveFrom(FutureState &&other) {
-    state_ = std::exchange(other.state_, State::kInvalid);
-    switch (state_) {
-      case State::kValue:
-        value_ = std::move(other.value_);
-        break;
-      case State::kException:
-        exception_ = std::exchange(other.exception_, nullptr);
-        break;
-      default:
-        break;
-    }
-  }
-
   FutureState(const FutureState &) = delete;
   FutureState &operator=(const FutureState &) = delete;
 
-  friend class Promise<T...>;
-  friend class Future<T...>;
-
  private:
-  enum class State {
-    kEmpty,
-    kValue,
-    kException,
-    kInvalid
-  } state_{State::kEmpty};
+  union EState {
+    enum State : std::uintptr_t {
+      kInvalid = 0,
+      kEmpty = 1,
+      kValue = 2,
+      // Invalid exception_ptr value above.
+      kExceptionMin = 3,
+    };
+
+    // Explicit constructor/destructor.
+    EState() { state_ = State::kEmpty; }
+
+    EState(State state) : state_(state) {
+      assert(state_ < State::kExceptionMin);
+    }
+
+    EState(std::exception_ptr &&exception) : exception_(std::move(exception)) {
+      assert(state_ >= State::kExceptionMin);
+    }
+
+    EState(EState &&other) { MoveFrom(std::move(other)); }
+
+    ~EState() { assert(state_ < State::kExceptionMin); }
+
+    EState &operator=(EState &&other) {
+      if (this != &other) {
+        assert(state_ < State::kExceptionMin);
+        MoveFrom(std::move(other));
+      }
+      return *this;
+    }
+
+    // According to C++ standard, it's actually UB to access the inactive
+    // members of a union. But we do it anyway, because we know that's supported
+    // by most compilers.
+    State state_;
+    std::exception_ptr exception_;
+    static_assert(sizeof(std::exception_ptr) == sizeof(State));
+
+   private:
+    void MoveFrom(EState &&other) {
+      if (other.state_ >= State::kExceptionMin) {
+        new (&exception_) std::exception_ptr(std::move(other.exception_));
+      } else {
+        state_ = std::exchange(other.state_, State::kInvalid);
+      }
+    }
+  } estate_;
+
   std::tuple<T...> value_;
-  std::exception_ptr exception_;
 };
 
 struct ContinuationBase {
@@ -165,7 +200,7 @@ struct Continuation : public ContinuationBase {
 
 // Perhaps users also need this function.
 template <typename FutureType>
-FutureType MakeExceptionalFuture(std::exception_ptr exception) {
+FutureType MakeExceptionalFuture(std::exception_ptr &&exception) {
   return FutureType(details::MakeExceptionalFutureTag{}, std::move(exception));
 }
 
@@ -183,7 +218,7 @@ Future<T...> MakeReadyFuture(U &&...val) {
 }
 
 template <typename... T>
-Future<T...> MakeExceptionalFuture(std::exception_ptr exception) {
+Future<T...> MakeExceptionalFuture(std::exception_ptr &&exception) {
   return Future<T...>(details::MakeExceptionalFutureTag{},
                       std::move(exception));
 }
@@ -223,7 +258,7 @@ class Future {
       return FuturizeApply(std::forward<Callback>(callback),
                            std::move(state_).Value());
     } else if (state_.Failed()) {
-      return details::MakeExceptionalFuture<FR>(state_.Exception());
+      return details::MakeExceptionalFuture<FR>(std::move(state_).Exception());
     } else {
       assert(promise_);
       assert(!promise_->continuation_);
@@ -296,11 +331,13 @@ class Future {
   std::tuple<T...> &&Value() { return std::move(state_).Value(); }
 
   template <size_t Index>
-  auto Value() {
+  auto &&Value() {
     return std::get<Index>(Value());
   }
 
-  std::exception_ptr Exception() { return state_.Exception(); }
+  std::exception_ptr Exception() {
+    return std::move(state_).Exception();  // NRVO?
+  }
 
  private:
   friend class Promise<T...>;
@@ -312,17 +349,17 @@ class Future {
   friend Future<U...> MakeReadyFuture(V &&...);
 
   template <typename... U>
-  friend Future<U...> MakeExceptionalFuture(std::exception_ptr);
+  friend Future<U...> MakeExceptionalFuture(std::exception_ptr &&);
 
   template <typename FutureType>
-  friend FutureType details::MakeExceptionalFuture(std::exception_ptr);
+  friend FutureType details::MakeExceptionalFuture(std::exception_ptr &&);
 
   template <typename... U>
   Future(details::MakeReadyFutureTag tag, U &&...val)
       : state_(tag, std::move(val)...), promise_(nullptr) {}
 
-  Future(details::MakeExceptionalFutureTag tag, std::exception_ptr exception)
-      : state_(tag, exception), promise_(nullptr) {}
+  Future(details::MakeExceptionalFutureTag tag, std::exception_ptr &&exception)
+      : state_(tag, std::move(exception)), promise_(nullptr) {}
 
   Future(Promise<T...> *promise)
       : state_(std::move(*(promise->p_state_))), promise_(promise) {
@@ -364,7 +401,7 @@ class Future {
     if (state_.Ready()) {
       promise.SetValue(std::move(state_).Value());
     } else if (state_.Failed()) {
-      promise.SetException(state_.Exception());
+      promise.SetException(std::move(state_).Exception());
     } else {
       assert(promise_);
       *promise_ = std::move(promise);
@@ -420,13 +457,13 @@ class Promise {
     }
   }
 
-  void SetException(std::exception_ptr exception) {
+  void SetException(std::exception_ptr &&exception) {
     // In case that the counterpart Future has been destructed, such as the ones
     // returned by Then() abandoned by user.
     if (!p_state_) return;
 
     assert(p_state_->Empty());
-    p_state_->SetException(exception);
+    p_state_->SetException(std::move(exception));
 
     // Clear the continuation member before scheduling, because this promise
     // might be destructed before the continuation is done.
