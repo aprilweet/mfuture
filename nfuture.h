@@ -71,15 +71,21 @@ class FutureState {
   ~FutureState() { assert(!Available()); }
 
   FutureState &operator=(FutureState &&other) {
-    if (this != &other) {
-      assert(Empty());
-      MoveFrom(std::move(other));
-    }
+    if (this != &other) MoveFrom(std::move(other));
     return *this;
   }
 
-  void Reset() {
-    assert(!Available());
+  [[gnu::always_inline]] void Reset() {
+    switch (state_) {
+      // case State::kValue:
+      // value_ = std::tuple<T...>();
+      // break;
+      case State::kException:
+        ExceptionRef().~exception_ptr();
+        break;
+      default:
+        break;
+    }
     state_ = State::kEmpty;
   }
 
@@ -131,6 +137,7 @@ class FutureState {
 
  private:
   std::exception_ptr &&ExceptionRef() {
+    // std::launder?
     auto p = reinterpret_cast<std::exception_ptr *>(exception_.data());
     return std::move(*p);
   }
@@ -174,31 +181,39 @@ class FutureState {
       std::array<std::byte, sizeof(std::exception_ptr)> exception_;
 };
 
+template <class... T>
 struct ContinuationBase {
+  FutureState<T...> state_;
+
   virtual ~ContinuationBase() = default;
   virtual void Run() = 0;
 };
 
 template <class Callback, class... T>
-struct Continuation : public ContinuationBase {
+struct Continuation : public ContinuationBase<T...> {
   Continuation(Callback &&callback)
       : callback_(std::forward<Callback>(callback)) {}
 
   void Run() override {
     static_assert(
         std::is_void_v<std::invoke_result_t<Callback, FutureState<T...> &&>>);
-    std::invoke(callback_, std::move(state_));
+    std::invoke(callback_, std::move(ContinuationBase<T...>::state_));
     delete this;
   }
 
   Callback callback_;
-  FutureState<T...> state_;
 };
 
 // Perhaps users also need this function.
 template <typename FutureType>
 FutureType MakeExceptionalFuture(std::exception_ptr &&exception) {
   return FutureType(details::MakeExceptionalFutureTag{}, std::move(exception));
+}
+
+template <typename... T>
+void SetContinuation(Future<T...> &future, ContinuationBase<T...> *continuation,
+                     FutureState<T...> *state) {
+  future.SetContinuation(continuation, state);
 }
 
 }  // namespace details
@@ -221,7 +236,7 @@ Future<T...> MakeExceptionalFuture(std::exception_ptr &&exception) {
 }
 
 template <class... T>
-class Future {
+class [[nodiscard]] Future {
   static_assert(internal::IsNotVoid_v<T...>,
                 "Future's template arguments are NOT allowed to be void, use "
                 "Future<> instead of Future<void>.");
@@ -232,19 +247,21 @@ class Future {
  public:
   using PromiseType = Promise<T...>;
 
-  Future() : promise_(nullptr) {}
-
   Future(Future &&other) { MoveFrom(std::move(other)); }
 
   Future &operator=(Future &&other) {
     if (this != &other) {
-      Reset();
+      (void)Detach();
+      state_.Reset();
       MoveFrom(std::move(other));
     }
     return *this;
   }
 
-  ~Future() { Reset(); }
+  [[gnu::always_inline]] ~Future() {
+    (void)Detach();
+    Ignore();
+  }
 
   template <class Callback, class R = std::invoke_result_t<Callback, T &&...>>
   auto Then(Callback &&callback) {
@@ -281,10 +298,7 @@ class Future {
       };
       auto continuation =
           new details::Continuation<decltype(cb), T...>(std::move(cb));
-
-      promise_->continuation_ = continuation;
-      state_.SetInvalid();
-      promise_->p_state_ = &continuation->state_;
+      SetContinuation(continuation, &continuation->state_);
 
       return future;  // NRVO?
     }
@@ -315,12 +329,10 @@ class Future {
           promise.SetValue(std::invoke(callback, Future(std::move(state))));
         }
       };
+
       auto continuation =
           new details::Continuation<decltype(cb), T...>(std::move(cb));
-
-      promise_->continuation_ = continuation;
-      state_.SetInvalid();
-      promise_->p_state_ = &continuation->state_;
+      SetContinuation(continuation, &continuation->state_);
 
       return future;  // NRVO?
     }
@@ -341,6 +353,10 @@ class Future {
     return std::move(state_).Exception();  // NRVO?
   }
 
+  [[gnu::always_inline]] void Ignore() {
+    if (Available()) state_.Reset();
+  }
+
  private:
   friend class Promise<T...>;
 
@@ -355,6 +371,13 @@ class Future {
 
   template <typename FutureType>
   friend FutureType details::MakeExceptionalFuture(std::exception_ptr &&);
+
+  template <typename... U>
+  friend void details::SetContinuation(Future<U...> &,
+                                       details::ContinuationBase<U...> *,
+                                       details::FutureState<U...> *);
+
+  Future() : promise_(nullptr) {}
 
   template <typename... U>
   Future(details::MakeReadyFutureTag tag, U &&...val)
@@ -372,18 +395,20 @@ class Future {
   Future(details::FutureState<T...> &&state)
       : state_(std::move(state)), promise_(nullptr) {}
 
-  void Reset() {
+  Promise<T...> *Detach() {
     if (promise_) {
       promise_->future_ = nullptr;
       if (promise_->p_state_ == &state_) {
         assert(!promise_->continuation_);
         promise_->p_state_ = nullptr;
       }
+      return std::exchange(promise_, nullptr);
     }
+    return nullptr;
   }
 
   void MoveFrom(Future<T...> &&other) {
-    // Make `other` invalid. It's still reusable if `Reset` is called later on.
+    // Make `other` invalid.
     state_ = std::move(other.state_);
     promise_ = std::exchange(other.promise_, nullptr);
     if (promise_) {
@@ -392,7 +417,6 @@ class Future {
     }
   }
 
-  // Make it public?
   Promise<T...> GetPromise() {
     assert(!promise_);
     return Promise<T...>(this);
@@ -408,6 +432,16 @@ class Future {
       assert(promise_);
       *promise_ = std::move(promise);
     }
+  }
+
+  void SetContinuation(details::ContinuationBase<T...> *continuation,
+                       details::FutureState<T...> *state) {
+    assert(!Available());
+    assert(!promise_->continuation_);
+    promise_->continuation_ = continuation;
+    assert(promise_->p_state_ == &state_);
+    *state = std::move(state_);
+    promise_->p_state_ = state;
   }
 
  private:
@@ -503,7 +537,7 @@ class Promise {
   }
 
   void MoveFrom(Promise &&other) {
-    // Make `other` invalid. It's still reusable if `Reset` is called later on.
+    // Make `other` invalid. It's still reusable if `Reset()` is called later.
     if (other.p_state_ == &other.state_) {
       state_ = std::move(other.state_);
     }
@@ -521,7 +555,7 @@ class Promise {
   details::FutureState<T...> state_;
   details::FutureState<T...> *p_state_;
   Future<T...> *future_;
-  details::ContinuationBase *continuation_;
+  details::ContinuationBase<T...> *continuation_;
 };
 
 template <>
@@ -560,37 +594,33 @@ auto FuturizeApply(Function &&f, Tuple &&t) {
 namespace details {
 
 template <typename Stop, typename Function>
-struct DoUntilState {
+struct DoUntilState : public ContinuationBase<> {
   DoUntilState(Stop &&stop, Function &&function)
       : stop_(std::forward<Stop>(stop)),
         function_(std::forward<Function>(function)) {}
 
-  Future<> GetFuture() { return promise_.GetFuture(); }
-
-  void Run() {
+  void Run() override {
     do {
       if (stop_()) {
         promise_.SetValue();
+        state_.Reset();
         delete this;
         break;
       } else {
         auto future = FuturizeInvoke(function_);
         if (future.Ready()) {
-          // Never use Then() to drive here to avoid stack overflow.
         } else if (future.Failed()) {
           promise_.SetValue();
           delete this;
           break;
         } else {
-          // Return value ignored.
-          future.Then([this]() { Run(); });
+          SetContinuation(future, this, &state_);
           break;
         }
       }
     } while (true);
   }
 
- private:
   Promise<> promise_;
   Stop stop_;
   Function function_;
@@ -610,16 +640,15 @@ Future<> DoUntil(Stop &&stop, Function &&function) {
     if (stop()) return MakeReadyFuture<>();
     auto future = FuturizeInvoke(function);
     if (future.Ready())
+      // Never use Then() to drive here to avoid stack overflow.
       continue;
     else if (future.Failed())
       return future;
     else {
       auto state = new details::DoUntilState<Stop, Function>(
           std::forward<Stop>(stop), std::forward<Function>(function));
-      auto ret = state->GetFuture();
-      // Return value ignored.
-      future.Then([state]() { state->Run(); });
-      return ret;
+      details::SetContinuation(future, state, &state->state_);
+      return state->promise_.GetFuture();
     }
   } while (true);
 }

@@ -7,13 +7,6 @@
 using namespace nfuture;
 
 TEST(Future, basic0) {
-  { Future<> future; }
-  { Future<void> future; }
-  { Future<float> future; }
-  { Future<int, bool> future; }
-}
-
-TEST(Future, basic1) {
   int counter = 0;
   {
     auto future = MakeReadyFuture<float>(0.1f)
@@ -68,7 +61,7 @@ TEST(Future, basic1) {
   ASSERT_EQ(counter, 5);
 }
 
-TEST(Future, basic2) {
+TEST(Future, basic1) {
   int counter = 0;
   {
     auto future =
@@ -96,6 +89,7 @@ TEST(Future, basic2) {
               ++counter;
               return true;
             });
+    EXPECT_TRUE(future.Ready());
   }
   ASSERT_EQ(counter, 3);
 }
@@ -103,19 +97,19 @@ TEST(Future, basic2) {
 TEST(Promise, basic0) {
   {
     Promise<> promise;
-    promise.GetFuture();
+    promise.GetFuture().Ignore();
   }
   {
     Promise<void> promise;
-    promise.GetFuture();
+    promise.GetFuture().Ignore();
   }
   {
     Promise<float> promise;
-    promise.GetFuture();
+    promise.GetFuture().Ignore();
   }
   {
     Promise<int, bool> promise;
-    promise.GetFuture();
+    promise.GetFuture().Ignore();
   }
 }
 
