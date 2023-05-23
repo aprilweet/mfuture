@@ -205,7 +205,7 @@ class FutureState {
   void SetException(std::exception_ptr&& e) {
     assert(inner_->state == 0);
     inner_->state = 2;
-    inner_->result.template emplace<1>(std::make_exception_ptr(std::move(e)));
+    inner_->result.template emplace<1>(std::move(e));
     TrySchedule();
   }
 
@@ -589,6 +589,11 @@ struct DoUntilState {
       : stop_(std::forward<Stop>(stop)),
         function_(std::forward<Function>(function)) {}
 
+  void SetFailed(std::exception_ptr&& e) {
+    promise_.SetException(std::move(e));
+    delete this;
+  }
+
   Future<> GetFuture() { return promise_.GetFuture(); }
 
   void Run() {
@@ -602,12 +607,19 @@ struct DoUntilState {
         if (future.IsReady()) {
           // Never use Then() to drive here to avoid stack overflow.
         } else if (future.IsFailed()) {
-          promise_.SetValue();
+          promise_.SetException(future.GetException());
           delete this;
           break;
         } else {
           // Return value ignored.
-          future.Then([this]() { Run(); });
+          future.Then([this](Future<>&& ft) {
+            if (ft.IsFailed()) {
+              SetFailed(ft.GetException());
+              return;
+            }
+            assert(ft.IsReady());
+            Run();
+          });
           break;
         }
       }
@@ -642,16 +654,17 @@ Future<> DoUntil(Stop&& stop, Function&& function) {
           std::forward<Stop>(stop), std::forward<Function>(function));
       auto ret = state->GetFuture();
       // Return value ignored.
-      future.Then([state]() { state->Run(); });
+      future.Then([state](Future<>&& ft) {
+        if (ft.IsFailed()) {
+          state->SetFailed(ft.GetException());
+          return;
+        }
+        assert(ft.IsReady());
+        state->Run();
+      });
       return ret;
     }
   } while (true);
-
-  auto state = new details::DoUntilState<Stop, Function>(
-      std::forward<Stop>(stop), std::forward<Function>(function));
-  auto ret = state->GetFuture();
-  state->Run();
-  return ret;
 }
 
 }  // namespace mfuture

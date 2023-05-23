@@ -137,6 +137,57 @@ TEST(Promise, basic1) {
   ASSERT_EQ(counter, 1);
 }
 
+TEST(DoUntil, failed) {
+  int counter = 0;
+  auto future =
+      DoUntil([]() { return false; },
+              [&counter]() {
+                ++counter;
+                return MakeExceptionalFuture<>(std::make_exception_ptr("stop"));
+              });
+  EXPECT_TRUE(future.Failed());
+  EXPECT_THROW(std::rethrow_exception(future.Exception()), const char *);
+  EXPECT_EQ(counter, 1);
+}
+
+TEST(DoUntil, pending_failed1) {
+  int counter = 0;
+  Promise<> promise;
+  auto future = DoUntil([&counter]() { return counter == 1; },
+                        [&counter, &promise]() {
+                          ++counter;
+                          return promise.GetFuture();
+                        });
+  ASSERT_FALSE(future.Available());
+  promise.SetException(std::make_exception_ptr("stop"));
+
+  ASSERT_TRUE(future.Failed());
+  ASSERT_THROW(std::rethrow_exception(future.Exception()), const char *);
+  ASSERT_EQ(counter, 1);
+}
+
+TEST(DoUntil, pending_failed2) {
+  int counter = 0;
+  Promise<> promise;
+  auto future = DoUntil(
+      [&counter]() { return false; },
+      [&counter, &promise]() {
+        if (counter == 0) {
+          ++counter;
+          return promise.GetFuture();
+        } else {
+          ++counter;
+          return MakeExceptionalFuture<>(std::make_exception_ptr("quit"));
+        }
+      });
+  ASSERT_FALSE(future.Available());
+  promise.SetValue();
+
+  ASSERT_TRUE(future.Failed());
+  ASSERT_THROW(std::rethrow_exception(future.Exception()), const char *);
+  ASSERT_EQ(counter, 2);
+}
+
 constexpr int kTimes = 1000000;
 
 TEST(perf, mark) {

@@ -211,9 +211,9 @@ FutureType MakeExceptionalFuture(std::exception_ptr &&exception) {
 }
 
 template <typename... T>
-void SetContinuation(Future<T...> &future, ContinuationBase<T...> *continuation,
-                     FutureState<T...> *state) {
-  future.SetContinuation(continuation, state);
+void SetContinuation(Future<T...> &future,
+                     ContinuationBase<T...> *continuation) {
+  future.SetContinuation(continuation);
 }
 
 }  // namespace details
@@ -298,7 +298,7 @@ class [[nodiscard]] Future {
       };
       auto continuation =
           new details::Continuation<decltype(cb), T...>(std::move(cb));
-      SetContinuation(continuation, &continuation->state_);
+      SetContinuation(continuation);
 
       return future;  // NRVO?
     }
@@ -332,7 +332,7 @@ class [[nodiscard]] Future {
 
       auto continuation =
           new details::Continuation<decltype(cb), T...>(std::move(cb));
-      SetContinuation(continuation, &continuation->state_);
+      SetContinuation(continuation);
 
       return future;  // NRVO?
     }
@@ -374,8 +374,7 @@ class [[nodiscard]] Future {
 
   template <typename... U>
   friend void details::SetContinuation(Future<U...> &,
-                                       details::ContinuationBase<U...> *,
-                                       details::FutureState<U...> *);
+                                       details::ContinuationBase<U...> *);
 
   Future() : promise_(nullptr) {}
 
@@ -434,14 +433,13 @@ class [[nodiscard]] Future {
     }
   }
 
-  void SetContinuation(details::ContinuationBase<T...> *continuation,
-                       details::FutureState<T...> *state) {
+  void SetContinuation(details::ContinuationBase<T...> *continuation) {
     assert(!Available());
     assert(!promise_->continuation_);
     promise_->continuation_ = continuation;
     assert(promise_->p_state_ == &state_);
-    *state = std::move(state_);
-    promise_->p_state_ = state;
+    continuation->state_ = std::move(state_);
+    promise_->p_state_ = &continuation->state_;
   }
 
  private:
@@ -600,6 +598,12 @@ struct DoUntilState : public ContinuationBase<> {
         function_(std::forward<Function>(function)) {}
 
   void Run() override {
+    assert(state_.Available());
+    if (state_.Failed()) {
+      promise_.SetException(std::move(state_).Exception());
+      delete this;
+      return;
+    }
     do {
       if (stop_()) {
         promise_.SetValue();
@@ -610,11 +614,12 @@ struct DoUntilState : public ContinuationBase<> {
         auto future = FuturizeInvoke(function_);
         if (future.Ready()) {
         } else if (future.Failed()) {
-          promise_.SetValue();
+          promise_.SetException(future.Exception());
+          state_.Reset();
           delete this;
           break;
         } else {
-          SetContinuation(future, this, &state_);
+          SetContinuation(future, this);
           break;
         }
       }
@@ -647,7 +652,7 @@ Future<> DoUntil(Stop &&stop, Function &&function) {
     else {
       auto state = new details::DoUntilState<Stop, Function>(
           std::forward<Stop>(stop), std::forward<Function>(function));
-      details::SetContinuation(future, state, &state->state_);
+      details::SetContinuation(future, state);
       return state->promise_.GetFuture();
     }
   } while (true);

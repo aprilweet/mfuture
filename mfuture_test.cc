@@ -12,12 +12,11 @@ TEST(Future, basic0) {
   EXPECT_FALSE(MakeReadyFuture<>().IsFailed());
   EXPECT_TRUE(MakeReadyFuture<>().IsResolved());
 
-  EXPECT_FALSE(MakeExceptionalFuture<>(std::runtime_error("test")).IsReady());
-  EXPECT_TRUE(MakeExceptionalFuture<>(std::runtime_error("test")).IsFailed());
-  EXPECT_TRUE(MakeExceptionalFuture<>(std::runtime_error("test")).IsResolved());
-  // EXPECT_EQ(0,
-  // strcmp(MakeExceptionalFuture<>(std::runtime_error("test")).GetException(),
-  // "test"));
+  auto future = MakeExceptionalFuture<>("test");
+  EXPECT_FALSE(future.IsReady());
+  EXPECT_TRUE(future.IsFailed());
+  EXPECT_TRUE(future.IsResolved());
+  ASSERT_THROW(std::rethrow_exception(future.GetException()), const char*);
 }
 
 TEST(Future, basic1) {
@@ -26,15 +25,11 @@ TEST(Future, basic1) {
   EXPECT_TRUE(MakeReadyFuture<void*>(nullptr).IsResolved());
   EXPECT_TRUE(MakeReadyFuture<bool>(true).GetValue<0>());
 
-  EXPECT_FALSE(
-      MakeExceptionalFuture<bool>(std::runtime_error("test")).IsReady());
-  EXPECT_TRUE(
-      MakeExceptionalFuture<int>(std::runtime_error("test")).IsFailed());
-  EXPECT_TRUE(
-      MakeExceptionalFuture<void*>(std::runtime_error("test")).IsResolved());
-  // EXPECT_EQ(0,
-  // strcmp(MakeExceptionalFuture<>(std::runtime_error("test")).GetException(),
-  // "test"));
+  auto future = MakeExceptionalFuture<bool>("test");
+  EXPECT_FALSE(future.IsReady());
+  EXPECT_TRUE(future.IsFailed());
+  EXPECT_TRUE(future.IsResolved());
+  ASSERT_THROW(std::rethrow_exception(future.GetException()), const char*);
 
   int a = 1;
   EXPECT_TRUE(MakeReadyFuture<int>(a).IsReady());
@@ -53,14 +48,11 @@ TEST(Future, basic2) {
   EXPECT_EQ((MakeReadyFuture<bool, int>(true, 2).GetValue()),
             std::make_tuple(true, 2));
 
-  EXPECT_FALSE(
-      (MakeExceptionalFuture<bool, int>(std::runtime_error("test")).IsReady()));
-  EXPECT_TRUE((
-      MakeExceptionalFuture<bool, int>(std::runtime_error("test")).IsFailed()));
-  EXPECT_TRUE((MakeExceptionalFuture<bool, int>(std::runtime_error("test"))
-                   .IsResolved()));
-  // EXPECT_EQ(0, strcmp(MakeExceptionalFuture<bool,
-  // int>(std::runtime_error("test")).GetException(), "test"));
+  auto future = MakeExceptionalFuture<bool, int>("test");
+  EXPECT_FALSE(future.IsReady());
+  EXPECT_TRUE(future.IsFailed());
+  EXPECT_TRUE(future.IsResolved());
+  ASSERT_THROW(std::rethrow_exception(future.GetException()), const char*);
 
   int a = 1;
   const bool b = true;
@@ -90,7 +82,7 @@ TEST(Promise, basic0) {
     EXPECT_TRUE(ft.IsResolved());
     EXPECT_FALSE(ft.IsReady());
     EXPECT_TRUE(ft.IsFailed());
-    // EXPECT_EQ(0, strcmp(ft.GetException(), "test"));
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     Promise<> pr;
@@ -131,7 +123,7 @@ TEST(Promise, basic1) {
     EXPECT_TRUE(ft.IsResolved());
     EXPECT_FALSE(ft.IsReady());
     EXPECT_TRUE(ft.IsFailed());
-    // EXPECT_EQ(0, strcmp(ft.GetException(), "test"));
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     Promise<bool> pr;
@@ -172,7 +164,7 @@ TEST(Promise, basic2) {
     EXPECT_TRUE(ft.IsResolved());
     EXPECT_FALSE(ft.IsReady());
     EXPECT_TRUE(ft.IsFailed());
-    // EXPECT_EQ(0, strcmp(ft.GetException(), "test"));
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     Promise<bool, int> pr;
@@ -210,11 +202,13 @@ TEST(Future, Then0) {
     auto ft = MakeReadyFuture<>().Then(
         []() { return MakeExceptionalFuture<>(std::runtime_error("test")); });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     auto ft =
         MakeReadyFuture<>().Then([]() { throw std::runtime_error("test"); });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     auto ft = MakeReadyFuture<>().Then(
@@ -223,7 +217,12 @@ TEST(Future, Then0) {
   }
   {
     auto ft = MakeExceptionalFuture<>(std::runtime_error("test"))
-                  .Then([](const Future<>& ft) { EXPECT_TRUE(ft.IsFailed()); });
+                  .Then([](const Future<>& ft) {
+                    EXPECT_TRUE(ft.IsFailed());
+                    EXPECT_THROW(std::rethrow_exception(
+                                     const_cast<Future<>&>(ft).GetException()),
+                                 std::runtime_error);
+                  });
     EXPECT_TRUE(ft.IsReady());
   }
   {
@@ -233,6 +232,7 @@ TEST(Future, Then0) {
                     std::rethrow_exception(ft.GetException());
                   });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
 }
 
@@ -260,11 +260,13 @@ TEST(Future, Then1) {
           return MakeExceptionalFuture<>(std::runtime_error("test"));
         });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     auto ft = MakeReadyFuture<float>(3.14f).Then(
         [](float) { throw std::runtime_error("test"); });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     auto ft = MakeReadyFuture<bool>(true).Then([](Future<bool>&& ft) {
@@ -276,7 +278,12 @@ TEST(Future, Then1) {
   {
     auto ft =
         MakeExceptionalFuture<float>(std::runtime_error("test"))
-            .Then([](const Future<float>& ft) { EXPECT_TRUE(ft.IsFailed()); });
+            .Then([](const Future<float>& ft) {
+              EXPECT_TRUE(ft.IsFailed());
+              EXPECT_THROW(std::rethrow_exception(
+                               const_cast<Future<float>&>(ft).GetException()),
+                           std::runtime_error);
+            });
     EXPECT_TRUE(ft.IsReady());
   }
   {
@@ -287,6 +294,7 @@ TEST(Future, Then1) {
               std::rethrow_exception(ft.GetException());
             });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
 }
 
@@ -319,11 +327,13 @@ TEST(Future, Then2) {
                     return MakeExceptionalFuture<>(std::runtime_error("test"));
                   });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     auto ft = MakeReadyFuture<float, long>(3.14f, 10).Then(
         [](float, long) { throw std::runtime_error("test"); });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
   {
     auto ft = MakeReadyFuture<bool, bool>(true, false)
@@ -334,10 +344,15 @@ TEST(Future, Then2) {
     EXPECT_TRUE(ft.IsReady());
   }
   {
-    auto ft = MakeExceptionalFuture<float, void*>(std::runtime_error("test"))
-                  .Then([](const Future<float, void*>& ft) {
-                    EXPECT_TRUE(ft.IsFailed());
-                  });
+    auto ft =
+        MakeExceptionalFuture<float, void*>(std::runtime_error("test"))
+            .Then([](const Future<float, void*>& ft) {
+              EXPECT_TRUE(ft.IsFailed());
+              EXPECT_THROW(
+                  std::rethrow_exception(
+                      const_cast<Future<float, void*>&>(ft).GetException()),
+                  std::runtime_error);
+            });
     EXPECT_TRUE(ft.IsReady());
   }
   {
@@ -348,32 +363,37 @@ TEST(Future, Then2) {
                     std::rethrow_exception(ft.GetException());
                   });
     EXPECT_TRUE(ft.IsFailed());
+    EXPECT_THROW(std::rethrow_exception(ft.GetException()), std::runtime_error);
   }
 }
 
 TEST(Future, Chain) {
   int i = 10;
   Promise<> pr;
-  auto ft = pr.GetFuture()
-                .Then([&i]() {
-                  --i;
-                  return i;
-                })
-                .Then([](int i) { return i == 0; })
-                .Then([](Future<bool>&& ft) {
-                  EXPECT_TRUE(ft.IsReady());
-                  EXPECT_FALSE(ft.GetValue<0>());
-                  throw std::runtime_error("test");
-                })
-                .Then([&i]() {
-                  i = 0;
-                  EXPECT_TRUE(false);  // never reach here.
-                  return true;
-                })
-                .Then([&i](const Future<bool>& ft) {
-                  EXPECT_TRUE(ft.IsFailed());
-                  return i;
-                });
+  auto ft =
+      pr.GetFuture()
+          .Then([&i]() {
+            --i;
+            return i;
+          })
+          .Then([](int i) { return i == 0; })
+          .Then([](Future<bool>&& ft) {
+            EXPECT_TRUE(ft.IsReady());
+            EXPECT_FALSE(ft.GetValue<0>());
+            throw std::runtime_error("test");
+          })
+          .Then([&i]() {
+            i = 0;
+            EXPECT_TRUE(false);  // never reach here.
+            return true;
+          })
+          .Then([&i](const Future<bool>& ft) {
+            EXPECT_TRUE(ft.IsFailed());
+            EXPECT_THROW(std::rethrow_exception(
+                             const_cast<Future<bool>&>(ft).GetException()),
+                         std::runtime_error);
+            return i;
+          });
 
   EXPECT_EQ(i, 10);
   EXPECT_FALSE(ft.IsResolved());
@@ -387,6 +407,55 @@ TEST(Future, Chain) {
 TEST(Future, testtest) {
   Promise<Future<>> pr;
   Future<Future<>> ft;
+}
+
+TEST(DoUntil, failed) {
+  int counter = 0;
+  auto future = DoUntil([]() { return false; },
+                        [&counter]() {
+                          ++counter;
+                          return MakeExceptionalFuture<>("stop");
+                        });
+  EXPECT_TRUE(future.IsFailed());
+  EXPECT_THROW(std::rethrow_exception(future.GetException()), const char*);
+  EXPECT_EQ(counter, 1);
+}
+
+TEST(DoUntil, pending_failed1) {
+  int counter = 0;
+  Promise<> promise;
+  auto future = DoUntil([&counter]() { return counter == 1; },
+                        [&counter, &promise]() {
+                          ++counter;
+                          return promise.GetFuture();
+                        });
+  ASSERT_FALSE(future.IsResolved());
+  promise.SetException("stop");
+
+  ASSERT_TRUE(future.IsFailed());
+  ASSERT_THROW(std::rethrow_exception(future.GetException()), const char*);
+  ASSERT_EQ(counter, 1);
+}
+
+TEST(DoUntil, pending_failed2) {
+  int counter = 0;
+  Promise<> promise;
+  auto future = DoUntil([&counter]() { return false; },
+                        [&counter, &promise]() {
+                          if (counter == 0) {
+                            ++counter;
+                            return promise.GetFuture();
+                          } else {
+                            ++counter;
+                            return MakeExceptionalFuture<>("quit");
+                          }
+                        });
+  ASSERT_FALSE(future.IsResolved());
+  promise.SetValue();
+
+  ASSERT_TRUE(future.IsFailed());
+  ASSERT_THROW(std::rethrow_exception(future.GetException()), const char*);
+  ASSERT_EQ(counter, 2);
 }
 
 constexpr int kTimes = 1000000;
