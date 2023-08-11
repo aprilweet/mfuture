@@ -7,6 +7,7 @@
 #include <functional>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 
 #include "traits.h"
 
@@ -265,7 +266,8 @@ class [[nodiscard]] Future {
 
   template <class Callback, class R = std::invoke_result_t<Callback, T &&...>>
   auto Then(Callback &&callback) {
-    // TODO(monte): Detect another Then.
+    assert(state_.Valid());  // Detect doubly Then.
+
     using FR =
         std::conditional_t<std::is_void_v<R>, Future<>, details::Futurized<R>>;
     if (state_.Ready()) {
@@ -307,6 +309,8 @@ class [[nodiscard]] Future {
   template <class Callback,
             class R = std::invoke_result_t<Callback, Future<T...> &&>>
   auto ThenWrap(Callback &&callback) {
+    assert(state_.Valid());  // Detect doubly Then.
+
     using FR =
         std::conditional_t<std::is_void_v<R>, Future<>, details::Futurized<R>>;
     if (state_.Available()) {
@@ -338,9 +342,20 @@ class [[nodiscard]] Future {
     }
   }
 
-  bool Available() const { return state_.Available(); }
-  bool Ready() const { return state_.Ready(); }
-  bool Failed() const { return state_.Failed(); }
+  bool Available() const {
+    assert(state_.Valid());
+    return state_.Available();
+  }
+
+  bool Ready() const {
+    assert(state_.Valid());
+    return state_.Ready();
+  }
+
+  bool Failed() const {
+    assert(state_.Valid());
+    return state_.Failed();
+  }
 
   std::tuple<T...> &&Value() { return std::move(state_).Value(); }
 
@@ -354,7 +369,7 @@ class [[nodiscard]] Future {
   }
 
   [[gnu::always_inline]] void Ignore() {
-    if (Available()) state_.Reset();
+    if (state_.Available()) state_.Reset();
   }
 
  private:
@@ -438,7 +453,7 @@ class [[nodiscard]] Future {
     assert(!promise_->continuation_);
     promise_->continuation_ = continuation;
     assert(promise_->p_state_ == &state_);
-    continuation->state_ = std::move(state_);
+    continuation->state_ = std::move(state_);  // Invalidates `state_`.
     promise_->p_state_ = &continuation->state_;
   }
 
@@ -480,12 +495,12 @@ class Promise {
     // returned by Then() abandoned by user.
     if (!p_state_) return;
 
-    assert(p_state_->Empty());
     p_state_->SetValue(std::forward<U>(value)...);
 
     // Clear the continuation member before scheduling, because this promise
     // might be destructed before the continuation is done.
     if (auto continuation = std::exchange(continuation_, nullptr)) {
+      p_state_ = nullptr;
       // TODO(monte): Schedule?
       continuation->Run();
     }
@@ -496,12 +511,12 @@ class Promise {
     // returned by Then() abandoned by user.
     if (!p_state_) return;
 
-    assert(p_state_->Empty());
     p_state_->SetException(std::move(exception));
 
     // Clear the continuation member before scheduling, because this promise
     // might be destructed before the continuation is done.
     if (auto continuation = std::exchange(continuation_, nullptr)) {
+      p_state_ = nullptr;
       // TODO(monte): Schedule?
       continuation->Run();
     }
@@ -536,11 +551,13 @@ class Promise {
 
   void MoveFrom(Promise &&other) {
     // Make `other` invalid. It's still reusable if `Reset()` is called later.
+    // TODO(monte): Restore to its original state?
     if (other.p_state_ == &other.state_) {
       state_ = std::move(other.state_);
+    } else {
+      p_state_ = std::exchange(other.p_state_, nullptr);
     }
 
-    p_state_ = std::exchange(other.p_state_, nullptr);
     future_ = std::exchange(other.future_, nullptr);
     continuation_ = std::exchange(other.continuation_, nullptr);
 
