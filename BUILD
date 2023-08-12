@@ -1,3 +1,8 @@
+config_setting(
+    name = "coroutines",
+    values = {"define": "coroutines=true"},
+)
+
 cc_library(
     name = "traits",
     hdrs = ["traits.h"],
@@ -25,6 +30,14 @@ cc_library(
     name = "nfuture",
     hdrs = ["nfuture.h"],
     deps = [":traits"],
+    defines = select({
+        ":coroutines": ["COROUTINES_ENABLED"],
+        "//conditions:default": [],
+    }),
+    copts = select({
+        ":coroutines": ["-fcoroutines"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_test(

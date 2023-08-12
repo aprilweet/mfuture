@@ -9,6 +9,11 @@
 #include <type_traits>
 #include <utility>
 
+#ifdef COROUTINES_ENABLED
+#include <coroutine>
+#include <cstdint>
+#endif
+
 #include "traits.h"
 
 namespace nfuture {
@@ -217,6 +222,14 @@ void SetContinuation(Future<T...> &future,
   future.SetContinuation(continuation);
 }
 
+#ifdef COROUTINES_ENABLED
+template <class... T>
+class CPromise;
+
+template <class... T>
+struct FinalAwaiter;
+#endif
+
 }  // namespace details
 
 template <typename Function, typename... Args>
@@ -252,7 +265,15 @@ class [[nodiscard]] Future {
 
   Future &operator=(Future &&other) {
     if (this != &other) {
-      (void)Detach();
+#ifdef COROUTINES_ENABLED
+      if (coroutine_) {
+        assert(coroutine_.done());
+        coroutine_.destroy();
+        assert(!promise_);  // Promise has been destroyed.
+      } else
+#endif
+        Detach();
+
       state_.Reset();
       MoveFrom(std::move(other));
     }
@@ -260,9 +281,45 @@ class [[nodiscard]] Future {
   }
 
   [[gnu::always_inline]] ~Future() {
-    (void)Detach();
+#ifdef COROUTINES_ENABLED
+    if (coroutine_) {
+      assert(coroutine_.done());
+      coroutine_.destroy();
+      assert(!promise_);  // Promise has been destroyed.
+    } else
+#endif
+      Detach();
+
     Ignore();
   }
+
+#ifdef COROUTINES_ENABLED
+  using promise_type = details::CPromise<T...>;
+
+  bool await_ready() const noexcept { return Available(); }
+
+  void await_suspend(std::coroutine_handle<> handle) noexcept {
+    assert(state_.Valid());  // Detect doubly Then.
+    assert(promise_);
+    assert(!promise_->resumption_);
+    promise_->resumption_ = handle;
+  }
+
+  auto await_resume() {
+    // Even `await_ready` returned true, `await_resume` is still called.
+    assert(Available());
+
+    if (state_.Failed()) std::rethrow_exception(std::move(state_).Exception());
+
+    auto &&value = std::move(state_).Value();
+    if constexpr (sizeof...(T) == 0)
+      return;
+    else if constexpr (sizeof...(T) == 1)
+      return std::get<0>(std::move(value));
+    else
+      return std::move(value);
+  }
+#endif
 
   template <class Callback, class R = std::invoke_result_t<Callback, T &&...>>
   auto Then(Callback &&callback) {
@@ -400,10 +457,19 @@ class [[nodiscard]] Future {
   Future(details::MakeExceptionalFutureTag tag, std::exception_ptr &&exception)
       : state_(tag, std::move(exception)), promise_(nullptr) {}
 
-  Future(Promise<T...> *promise)
+  Future(Promise<T...> *promise, bool coroutine)
       : state_(std::move(*(promise->p_state_))), promise_(promise) {
     promise_->p_state_ = &state_;
     promise_->future_ = this;
+
+    if (coroutine) {
+#ifdef COROUTINES_ENABLED
+      auto cpromise = promise_type::Cast(promise);
+      coroutine_ = std::coroutine_handle<promise_type>::from_promise(*cpromise);
+#else
+      assert(false);  // Impossible.
+#endif
+    }
   }
 
   Future(details::FutureState<T...> &&state)
@@ -429,6 +495,9 @@ class [[nodiscard]] Future {
       promise_->future_ = this;
       if (promise_->p_state_ == &other.state_) promise_->p_state_ = &state_;
     }
+#ifdef COROUTINES_ENABLED
+    coroutine_ = std::exchange(other.coroutine_, nullptr);
+#endif
   }
 
   Promise<T...> GetPromise() {
@@ -460,6 +529,9 @@ class [[nodiscard]] Future {
  private:
   details::FutureState<T...> state_;
   Promise<T...> *promise_;
+#ifdef COROUTINES_ENABLED
+  std::coroutine_handle<promise_type> coroutine_;
+#endif
 };
 
 template <>
@@ -482,48 +554,37 @@ class Promise {
 
   ~Promise() { Reset(); }
 
-  Future<T...> GetFuture() {
+  Future<T...> GetFuture(bool coroutine = false) {
     assert(!future_);
     assert(p_state_);
     assert(!continuation_);
-    return Future<T...>(this);
+    return Future<T...>(this, coroutine);
   }
 
   template <class... U>
   void SetValue(U &&...value) {
     // In case that the counterpart Future has been destructed, such as the ones
     // returned by Then() abandoned by user.
+    // TODO(monte): Detached coroutine?
     if (!p_state_) return;
-
     p_state_->SetValue(std::forward<U>(value)...);
 
-    // Clear the continuation member before scheduling, because this promise
-    // might be destructed before the continuation is done.
-    if (auto continuation = std::exchange(continuation_, nullptr)) {
-      p_state_ = nullptr;
-      // TODO(monte): Schedule?
-      continuation->Run();
-    }
+    Schedule();
   }
 
   void SetException(std::exception_ptr &&exception) {
-    // In case that the counterpart Future has been destructed, such as the ones
-    // returned by Then() abandoned by user.
     if (!p_state_) return;
-
     p_state_->SetException(std::move(exception));
 
-    // Clear the continuation member before scheduling, because this promise
-    // might be destructed before the continuation is done.
-    if (auto continuation = std::exchange(continuation_, nullptr)) {
-      p_state_ = nullptr;
-      // TODO(monte): Schedule?
-      continuation->Run();
-    }
+    Schedule();
   }
 
  private:
   friend class Future<T...>;
+#ifdef COROUTINES_ENABLED
+  friend class details::CPromise<T...>;
+  friend class details::FinalAwaiter<T...>;
+#endif
 
   Promise(Future<T...> *future)
       : p_state_(&future->state_), future_(future), continuation_(nullptr) {
@@ -566,11 +627,38 @@ class Promise {
     }
   }
 
+  void Schedule() {
+#ifdef COROUTINES_ENABLED
+    if (auto resumption = std::exchange(resumption_, nullptr)) {
+      assert(!continuation_);
+      assert(future_);
+      assert(p_state_ == &future_->state_);
+      // TODO(monte): Schedule to executor?
+      resumption.resume();
+      // The resumption might have destroyed this coroutine and this
+      // awaiter as well, thus we should do nothing here.
+      return;
+    }
+#endif
+
+    // Clear the continuation member in advance, because this promise
+    // might be destructed before the continuation is done.
+    if (auto continuation = std::exchange(continuation_, nullptr)) {
+      assert(p_state_ == &continuation->state_);
+      p_state_ = nullptr;
+      // TODO(monte): Schedule to executor?
+      continuation->Run();
+    }
+  }
+
  private:
   details::FutureState<T...> state_;
   details::FutureState<T...> *p_state_;
   Future<T...> *future_;
   details::ContinuationBase<T...> *continuation_;
+#ifdef COROUTINES_ENABLED
+  std::coroutine_handle<> resumption_;
+#endif
 };
 
 template <>
@@ -606,13 +694,118 @@ auto FuturizeApply(Function &&f, Tuple &&t) {
   }
 }
 
+#ifdef COROUTINES_ENABLED
+namespace details {
+
+template <typename... T>
+struct FinalAwaiter {
+  constexpr bool await_ready() noexcept { return false; }
+
+  void await_suspend(std::coroutine_handle<> h) noexcept {
+    // Already suspended.
+    auto &promise =
+        std::coroutine_handle<CPromise<T...>>::from_address(h.address())
+            .promise()
+            .promise_;
+
+    if (promise.p_state_) {
+      assert(promise.p_state_->Available());  // `co_return xxx;` missed?
+    } else {
+      // TODO(monte): Detached coroutine?
+    }
+
+    promise.Schedule();
+  }
+
+  void await_resume() noexcept {
+    // Never here.
+    assert(false);
+  }
+};
+
+// Due to C++20 coroutine's limitation, `return_value` and `return_void` can't
+// coexist in one class. To avoid specializing a whole `Promise` class, we use a
+// simple wrapper class here.
+template <typename... T>
+struct CPromise {
+  Promise<T...> promise_;
+
+  static CPromise *Cast(Promise<T...> *promise);
+
+  auto get_return_object() { return promise_.GetFuture(true); }
+
+  std::suspend_never initial_suspend() { return {}; }
+
+  FinalAwaiter<T...> final_suspend() noexcept { return {}; }
+
+  template <class U>
+  void return_value(U &&value) {
+    // Detached coroutine.
+    if (!promise_.p_state_) return;
+    // Never directly SetValue(i.e. run resumption/continuation) here, because
+    // the continuation might eventually destroy this coroutine then the
+    // following final_suspend access a dangling object(this Promise destroyed).
+    promise_.p_state_->SetValue(std::forward<U>(value));
+  }
+
+  void unhandled_exception() {
+    if (!promise_.p_state_) return;
+    promise_.p_state_->SetException(std::current_exception());
+  }
+};
+
+template <typename... T>
+CPromise<T...> *CPromise<T...>::Cast(Promise<T...> *promise) {
+  static constexpr std::size_t kPromiseOffset =
+      offsetof(CPromise<T...>, promise_);
+  return reinterpret_cast<CPromise<T...> *>(
+      reinterpret_cast<std::uintptr_t>(promise) - kPromiseOffset);
+}
+
+template <>
+struct CPromise<> {
+  Promise<> promise_;
+
+  static CPromise *Cast(Promise<> *promise);
+
+  auto get_return_object() { return promise_.GetFuture(true); }
+
+  std::suspend_never initial_suspend() { return {}; }
+
+  FinalAwaiter<> final_suspend() noexcept { return {}; }
+
+  void return_void() {
+    if (!promise_.p_state_) return;
+    promise_.p_state_->SetValue();
+  }
+
+  void unhandled_exception() {
+    if (!promise_.p_state_) return;
+    promise_.p_state_->SetException(std::current_exception());
+  }
+};
+
+// Ref::
+// https://stackoverflow.com/questions/4494919/multiple-definition-of-error-for-a-full-specialisation-of-a-template-functi
+inline CPromise<> *CPromise<>::Cast(Promise<> *promise) {
+  static constexpr std::size_t kPromiseOffset = offsetof(CPromise<>, promise_);
+  return reinterpret_cast<CPromise<> *>(
+      reinterpret_cast<std::uintptr_t>(promise) - kPromiseOffset);
+}
+
+}  // namespace details
+#endif
+
 namespace details {
 
 template <typename Stop, typename Function>
 struct DoUntilState : public ContinuationBase<> {
-  DoUntilState(Stop &&stop, Function &&function)
-      : stop_(std::forward<Stop>(stop)),
-        function_(std::forward<Function>(function)) {}
+  DoUntilState(Future<> &&future, Stop &&stop, Function &&function)
+      : future_(std::move(future)),
+        stop_(std::forward<Stop>(stop)),
+        function_(std::forward<Function>(function)) {
+    details::SetContinuation(future_, this);
+  }
 
   void Run() override {
     assert(state_.Available());
@@ -628,21 +821,22 @@ struct DoUntilState : public ContinuationBase<> {
         delete this;
         break;
       } else {
-        auto future = FuturizeInvoke(function_);
-        if (future.Ready()) {
-        } else if (future.Failed()) {
-          promise_.SetException(future.Exception());
+        future_ = FuturizeInvoke(function_);
+        if (future_.Ready()) {
+        } else if (future_.Failed()) {
+          promise_.SetException(future_.Exception());
           state_.Reset();
           delete this;
           break;
         } else {
-          SetContinuation(future, this);
+          SetContinuation(future_, this);
           break;
         }
       }
     } while (true);
   }
 
+  Future<> future_;  // Keep it alive in case that it's a coroutine.
   Promise<> promise_;
   Stop stop_;
   Function function_;
@@ -668,8 +862,8 @@ Future<> DoUntil(Stop &&stop, Function &&function) {
       return future;
     else {
       auto state = new details::DoUntilState<Stop, Function>(
-          std::forward<Stop>(stop), std::forward<Function>(function));
-      details::SetContinuation(future, state);
+          std::move(future), std::forward<Stop>(stop),
+          std::forward<Function>(function));
       return state->promise_.GetFuture();
     }
   } while (true);

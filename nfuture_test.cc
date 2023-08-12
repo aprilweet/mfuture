@@ -317,3 +317,313 @@ TEST(perf, unready_then) {
   EXPECT_TRUE(future.Ready());
   ASSERT_EQ(counter, kTimes);
 }
+
+#ifdef COROUTINES_ENABLED
+
+TEST(coroutines, basic0) {
+  {
+    auto coro = []() -> Future<> { co_return; };
+    auto future = coro();
+    EXPECT_TRUE(future.Ready());
+  }
+  {
+    auto coro = []() -> Future<int> { co_return 1; };
+    auto future = coro();
+    EXPECT_TRUE(future.Ready());
+    EXPECT_EQ(future.Value<0>(), 1);
+  }
+  {
+    auto coro = []() -> Future<bool, char> {
+      co_return std::make_tuple<bool, char>(true, 2);
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Ready());
+    auto [a, b] = future.Value();
+    EXPECT_EQ(a, true);
+    EXPECT_EQ(b, 2);
+  }
+  {
+    auto coro = []() -> Future<> {
+      throw 0.1f;
+      co_return;
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Failed());
+    EXPECT_THROW(std::rethrow_exception(future.Exception()), float);
+  }
+  {
+    auto coro = []() -> Future<int> {
+      co_await MakeExceptionalFuture<>(std::make_exception_ptr(0.1f));
+      EXPECT_TRUE(false);  // Never here.
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Failed());
+    EXPECT_THROW(std::rethrow_exception(future.Exception()), float);
+  }
+}
+
+TEST(coroutines, basic1) {
+  {
+    auto coro = []() -> Future<int> {
+      co_await MakeReadyFuture<>();
+      auto value = co_await MakeReadyFuture<bool>(true);
+      EXPECT_EQ(value, true);
+      auto [a, b] = co_await MakeReadyFuture<bool, char>(true, 2);
+      EXPECT_EQ(a, true);
+      EXPECT_EQ(b, 2);
+      co_return 1;
+      // If `return`, it does not compile.
+      // If `co_return` without value, it does not compile.
+      // If no any return, it compiles without any warning, however, it imposes
+      // a runtime error later.
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Ready());
+    EXPECT_EQ(future.Value<0>(), 1);
+  }
+  {
+    auto coro = []() -> Future<int> {
+      co_await MakeReadyFuture<>();
+      try {
+        co_await MakeExceptionalFuture<>(std::make_exception_ptr(0.1f));
+        EXPECT_TRUE(false);  // Never here.
+      } catch (...) {
+        EXPECT_THROW(std::rethrow_exception(std::current_exception()), float);
+      }
+      co_await MakeExceptionalFuture<bool, char>(std::make_exception_ptr(0.1f));
+      EXPECT_TRUE(false);  // Never here.
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Failed());
+    EXPECT_THROW(std::rethrow_exception(future.Exception()), float);
+  }
+}
+
+TEST(coroutines, basic2) {
+  {
+    auto coro = []() -> Future<int> {
+      auto coro = []() -> Future<int> { co_return 1; };
+      auto future = coro();
+      EXPECT_TRUE(future.Ready());
+      co_return future.Value<0>();
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Ready());
+    EXPECT_EQ(future.Value<0>(), 1);
+  }
+  {
+    auto coro = []() -> Future<int> {
+      auto coro = []() -> Future<int> { throw 0.1f; };
+      try {
+        co_await coro();
+        EXPECT_TRUE(false);  // Never here.
+      } catch (...) {
+        EXPECT_THROW(std::rethrow_exception(std::current_exception()), float);
+      }
+      co_await coro();
+      EXPECT_TRUE(false);  // Never here.
+    };
+    auto future = coro();
+    EXPECT_TRUE(future.Failed());
+    EXPECT_THROW(std::rethrow_exception(future.Exception()), float);
+  }
+}
+
+TEST(coroutines, unready1) {
+  {
+    Promise<int> promise1;
+    Promise<char> promise2;
+
+    auto coro = [&]() -> Future<int> {
+      auto value = co_await promise1.GetFuture();
+      auto value2 = co_await promise2.GetFuture();
+      co_return value + (int)value2;
+    };
+
+    auto future = coro();
+    EXPECT_FALSE(future.Available());
+
+    promise1.SetValue(1);
+    EXPECT_FALSE(future.Available());
+
+    promise2.SetValue(2);
+    EXPECT_TRUE(future.Ready());
+    EXPECT_EQ(future.Value<0>(), 3);
+  }
+  {
+    Promise<int> promise1;
+    Promise<char> promise2;
+
+    auto coro = [&]() -> Future<int> {
+      try {
+        co_await promise1.GetFuture();
+        EXPECT_TRUE(false);  // Never here.
+      } catch (...) {
+        EXPECT_THROW(std::rethrow_exception(std::current_exception()), bool);
+      }
+      co_await promise2.GetFuture();
+      EXPECT_TRUE(false);  // Never here.
+    };
+
+    auto future = coro();
+    EXPECT_FALSE(future.Available());
+
+    promise1.SetException(std::make_exception_ptr(false));
+    EXPECT_FALSE(future.Available());
+
+    promise2.SetException(std::make_exception_ptr(false));
+    EXPECT_TRUE(future.Failed());
+    EXPECT_THROW(std::rethrow_exception(future.Exception()), bool);
+  }
+}
+
+TEST(coroutines, unready2) {
+  {
+    Promise<int> promise1;
+
+    auto coro = [&]() -> Future<int> {
+      Promise<int> promise2;
+      auto coro = [&]() -> Future<int> {
+        auto value = co_await promise1.GetFuture();
+        promise2.SetValue(2);
+        co_return value;
+      };
+      auto value1 = co_await coro();
+      auto value2 = co_await promise2.GetFuture();
+      co_return value1 + value2;
+    };
+
+    auto future = coro();
+    EXPECT_FALSE(future.Available());
+
+    promise1.SetValue(1);
+    EXPECT_TRUE(future.Ready());
+    EXPECT_EQ(future.Value<0>(), 3);
+  }
+  {
+    Promise<int> promise1;
+
+    auto coro = [&]() -> Future<int> {
+      Promise<int> promise2;
+      auto coro = [&]() -> Future<int> {
+        try {
+          co_await promise1.GetFuture();
+          EXPECT_TRUE(false);  // Never here.
+        } catch (...) {
+          EXPECT_THROW(std::rethrow_exception(std::current_exception()), bool);
+        }
+        promise2.SetException(std::make_exception_ptr(false));
+        co_return 1;
+      };
+      auto value1 = co_await coro();
+      EXPECT_EQ(value1, 1);
+      co_await promise2.GetFuture();
+      EXPECT_TRUE(false);  // Never here.
+    };
+
+    auto future = coro();
+    EXPECT_FALSE(future.Available());
+
+    promise1.SetException(std::make_exception_ptr(false));
+    EXPECT_TRUE(future.Failed());
+    EXPECT_THROW(std::rethrow_exception(future.Exception()), bool);
+  }
+}
+
+TEST(coroutines_perf, ready0) {
+  int counter = 0;
+
+  auto coro = [&, n = kTimes]() mutable -> Future<> {
+    while (n-- > 0) {
+      ++counter;
+      co_await MakeReadyFuture<>();
+    }
+  };
+
+  auto future = coro();
+  EXPECT_TRUE(future.Ready());
+  ASSERT_EQ(counter, kTimes);
+}
+
+TEST(coroutines_perf, ready1) {
+  int counter = 0;
+  auto future = DoUntil([n = kTimes]() mutable { return n-- == 0; },
+                        [&]() -> Future<> {
+                          ++counter;
+                          co_return;
+                        });
+  EXPECT_TRUE(future.Ready());
+  ASSERT_EQ(counter, kTimes);
+}
+
+TEST(coroutines_perf, ready2) {
+  int counter = 0;
+
+  auto coro = [&, n = kTimes]() mutable -> Future<> {
+    while (n-- > 0) {
+      auto coro = [&]() -> Future<> {
+        ++counter;
+        co_return;
+      };
+      co_await coro();
+    }
+  };
+
+  auto future = coro();
+  EXPECT_TRUE(future.Ready());
+  ASSERT_EQ(counter, kTimes);
+}
+
+TEST(coroutines_perf, unready0) {
+  int counter = 0;
+
+  Promise<> *promise = nullptr;
+  auto coro = [&, n = kTimes]() mutable -> Future<> {
+    while (n-- > 0) {
+      ++counter;
+      EXPECT_EQ(promise, nullptr);
+      promise = new Promise<>();
+      co_await promise->GetFuture();
+      delete promise;
+      promise = nullptr;
+    }
+  };
+
+  auto future = coro();
+  EXPECT_FALSE(future.Ready());
+
+  while (promise) {
+    promise->SetValue();
+  }
+
+  EXPECT_TRUE(future.Ready());
+  ASSERT_EQ(counter, kTimes);
+}
+
+TEST(coroutines_perf, unready1) {
+  int counter = 0;
+  Promise<> *promise = nullptr;
+  auto future = DoUntil(
+      [&, n = kTimes]() mutable {
+        if (promise) {
+          delete promise;
+          promise = nullptr;
+        }
+        return n-- == 0;
+      },
+      [&]() -> Future<> {
+        EXPECT_EQ(promise, nullptr);
+        promise = new Promise<>();
+        ++counter;
+        co_await promise->GetFuture();
+      });
+
+  while (promise) {
+    promise->SetValue();
+  }
+
+  EXPECT_TRUE(future.Ready());
+  ASSERT_EQ(counter, kTimes);
+}
+
+#endif

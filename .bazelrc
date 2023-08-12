@@ -1,7 +1,15 @@
-build --cxxopt=-std=c++17
+# build --cxxopt=-std=c++17
+
+build --cxxopt=-std=c++20
+build --define coroutines=true
+# LD_PRELOAD=/usr/lib64/libasan.so.6
+# https://github.com/bazelbuild/bazel/issues/10327
+# https://github.com/bazelbuild/bazel/issues/10905
+build --action_env=BAZEL_LINKOPTS=
+build --action_env=BAZEL_LINKLIBS=-lstdc++:-lm
 
 # LD_PRELOAD=/usr/lib64/libasan.so.4
-# build --copt=-fsanitize=address
-# build --linkopt=-fsanitize=address
+build --copt=-fsanitize=address
+build --linkopt=-fsanitize=address
 
 # build --linkopt="-lprofiler"
