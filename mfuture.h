@@ -307,70 +307,21 @@ class FutureState {
 // to seastar::make_ready_future. Ref:
 // https://stackoverflow.com/questions/9831501/how-can-i-have-multiple-parameter-packs-in-a-variadic-template
 template <typename... T, typename... U>
-Future<T...> MakeReadyFuture(U&&... val) {
-  return Future<T...>(details::MakeReadyFutureTag{}, std::forward<U>(val)...);
-}
+Future<T...> MakeReadyFuture(U&&... val);
 
 template <typename... T>
-Future<T...> MakeExceptionalFuture(std::exception_ptr&& e) {
-  return Future<T...>(details::MakeExceptionalFutureTag{}, std::move(e));
-}
+Future<T...> MakeExceptionalFuture(std::exception_ptr&& e);
 
 // FIXME(monte): Is it valid to make template param pack before others?
 template <typename... T, typename E>
-Future<T...> MakeExceptionalFuture(E&& e) {
-  return Future<T...>(details::MakeExceptionalFutureTag{},
-                      std::make_exception_ptr(std::forward<E>(e)));
-}
+Future<T...> MakeExceptionalFuture(E&& e);
 
 // TODO(monte): Add executor support, caring about the thread-safety
 template <typename Function, typename... Args>
-auto FuturizeInvoke(Function&& f, Args&&... args) {
-  using R = typename internal::ClosureTraits<Function>::ReturnType;
-  try {
-    if constexpr (details::IsFuture_v<R>) {
-      return std::invoke(std::forward<Function>(f),
-                         std::forward<Args>(args)...);
-    } else if constexpr (std::is_void_v<R>) {
-      std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
-      return MakeReadyFuture<>();
-    } else {
-      auto r =
-          std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
-      return MakeReadyFuture<R>(std::move(r));
-    }
-  } catch (...) {
-    if constexpr (details::IsFuture_v<R>)
-      return details::MakeExceptionalFuture0<R>(std::current_exception());
-    else if constexpr (std::is_void_v<R>)
-      return MakeExceptionalFuture<>(std::current_exception());
-    else
-      return MakeExceptionalFuture<R>(std::current_exception());
-  }
-}
+auto FuturizeInvoke(Function&& f, Args&&... args);
 
 template <typename Function, typename Tuple>
-auto FuturizeApply(Function&& f, Tuple&& t) {
-  using R = typename internal::ClosureTraits<Function>::ReturnType;
-  try {
-    if constexpr (details::IsFuture_v<R>) {
-      return std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
-    } else if constexpr (std::is_void_v<R>) {
-      std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
-      return MakeReadyFuture<>();
-    } else {
-      auto r = std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
-      return MakeReadyFuture<R>(std::move(r));
-    }
-  } catch (...) {
-    if constexpr (details::IsFuture_v<R>)
-      return details::MakeExceptionalFuture0<R>(std::current_exception());
-    else if constexpr (std::is_void_v<R>)
-      return MakeExceptionalFuture<>(std::current_exception());
-    else
-      return MakeExceptionalFuture<R>(std::current_exception());
-  }
-}
+auto FuturizeApply(Function&& f, Tuple&& t);
 
 template <typename... T>
 class Promise;
@@ -460,7 +411,7 @@ class Future {
 
   Future(details::MakeExceptionalFutureTag, std::exception_ptr&& e) {
     state_ = std::make_shared<details::FutureState<T...>>();
-    state_->template SetException(std::move(e));
+    state_->SetException(std::move(e));
   }
 
   template <typename Callback>
@@ -580,6 +531,72 @@ class Promise {
 static_assert(internal::IsDefaultConstructible_v<Promise<>>);
 static_assert(internal::IsDefaultConstructible_v<Future<bool>>);
 static_assert(internal::IsDefaultConstructible_v<Promise<int>>);
+
+template <typename... T, typename... U>
+Future<T...> MakeReadyFuture(U&&... val) {
+  return Future<T...>(details::MakeReadyFutureTag{}, std::forward<U>(val)...);
+}
+
+template <typename... T>
+Future<T...> MakeExceptionalFuture(std::exception_ptr&& e) {
+  return Future<T...>(details::MakeExceptionalFutureTag{}, std::move(e));
+}
+
+// FIXME(monte): Is it valid to make template param pack before others?
+template <typename... T, typename E>
+Future<T...> MakeExceptionalFuture(E&& e) {
+  return Future<T...>(details::MakeExceptionalFutureTag{},
+                      std::make_exception_ptr(std::forward<E>(e)));
+}
+
+// TODO(monte): Add executor support, caring about the thread-safety
+template <typename Function, typename... Args>
+auto FuturizeInvoke(Function&& f, Args&&... args) {
+  using R = typename internal::ClosureTraits<Function>::ReturnType;
+  try {
+    if constexpr (details::IsFuture_v<R>) {
+      return std::invoke(std::forward<Function>(f),
+                         std::forward<Args>(args)...);
+    } else if constexpr (std::is_void_v<R>) {
+      std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
+      return MakeReadyFuture<>();
+    } else {
+      auto r =
+          std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
+      return MakeReadyFuture<R>(std::move(r));
+    }
+  } catch (...) {
+    if constexpr (details::IsFuture_v<R>)
+      return details::MakeExceptionalFuture0<R>(std::current_exception());
+    else if constexpr (std::is_void_v<R>)
+      return MakeExceptionalFuture<>(std::current_exception());
+    else
+      return MakeExceptionalFuture<R>(std::current_exception());
+  }
+}
+
+template <typename Function, typename Tuple>
+auto FuturizeApply(Function&& f, Tuple&& t) {
+  using R = typename internal::ClosureTraits<Function>::ReturnType;
+  try {
+    if constexpr (details::IsFuture_v<R>) {
+      return std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
+    } else if constexpr (std::is_void_v<R>) {
+      std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
+      return MakeReadyFuture<>();
+    } else {
+      auto r = std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
+      return MakeReadyFuture<R>(std::move(r));
+    }
+  } catch (...) {
+    if constexpr (details::IsFuture_v<R>)
+      return details::MakeExceptionalFuture0<R>(std::current_exception());
+    else if constexpr (std::is_void_v<R>)
+      return MakeExceptionalFuture<>(std::current_exception());
+    else
+      return MakeExceptionalFuture<R>(std::current_exception());
+  }
+}
 
 namespace details {
 

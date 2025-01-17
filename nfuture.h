@@ -227,7 +227,7 @@ template <class... T>
 class CPromise;
 
 template <class... T>
-struct FinalAwaiter;
+class FinalAwaiter;
 #endif
 
 }  // namespace details
@@ -698,7 +698,8 @@ auto FuturizeApply(Function &&f, Tuple &&t) {
 namespace details {
 
 template <typename... T>
-struct FinalAwaiter {
+class FinalAwaiter {
+ public:
   constexpr bool await_ready() noexcept { return false; }
 
   void await_suspend(std::coroutine_handle<> h) noexcept {
@@ -706,7 +707,7 @@ struct FinalAwaiter {
     auto &promise =
         std::coroutine_handle<CPromise<T...>>::from_address(h.address())
             .promise()
-            .promise_;
+            .Cast();
 
     if (promise.p_state_) {
       assert(promise.p_state_->Available());  // `co_return xxx;` missed?
@@ -727,10 +728,13 @@ struct FinalAwaiter {
 // coexist in one class. To avoid specializing a whole `Promise` class, we use a
 // simple wrapper class here.
 template <typename... T>
-struct CPromise {
+class CPromise {
   Promise<T...> promise_;
 
+ public:
   static CPromise *Cast(Promise<T...> *promise);
+
+  Promise<T...> &Cast() { return promise_; }
 
   auto get_return_object() { return promise_.GetFuture(true); }
 
@@ -763,10 +767,13 @@ CPromise<T...> *CPromise<T...>::Cast(Promise<T...> *promise) {
 }
 
 template <>
-struct CPromise<> {
+class CPromise<> {
   Promise<> promise_;
 
+ public:
   static CPromise *Cast(Promise<> *promise);
+
+  Promise<> &Cast() { return promise_; }
 
   auto get_return_object() { return promise_.GetFuture(true); }
 

@@ -170,7 +170,7 @@ TEST(DoUntil, pending_failed2) {
   int counter = 0;
   Promise<> promise;
   auto future = DoUntil(
-      [&counter]() { return false; },
+      []() { return false; },
       [&counter, &promise]() {
         if (counter == 0) {
           ++counter;
@@ -355,6 +355,7 @@ TEST(coroutines, basic0) {
     auto coro = []() -> Future<int> {
       co_await MakeExceptionalFuture<>(std::make_exception_ptr(0.1f));
       EXPECT_TRUE(false);  // Never here.
+      co_return -1;
     };
     auto future = coro();
     EXPECT_TRUE(future.Failed());
@@ -392,6 +393,7 @@ TEST(coroutines, basic1) {
       }
       co_await MakeExceptionalFuture<bool, char>(std::make_exception_ptr(0.1f));
       EXPECT_TRUE(false);  // Never here.
+      co_return -1;
     };
     auto future = coro();
     EXPECT_TRUE(future.Failed());
@@ -422,6 +424,7 @@ TEST(coroutines, basic2) {
       }
       co_await coro();
       EXPECT_TRUE(false);  // Never here.
+      co_return -1;
     };
     auto future = coro();
     EXPECT_TRUE(future.Failed());
@@ -463,6 +466,7 @@ TEST(coroutines, unready1) {
       }
       co_await promise2.GetFuture();
       EXPECT_TRUE(false);  // Never here.
+      co_return -1;
     };
 
     auto future = coro();
@@ -519,6 +523,7 @@ TEST(coroutines, unready2) {
       EXPECT_EQ(value1, 1);
       co_await promise2.GetFuture();
       EXPECT_TRUE(false);  // Never here.
+      co_return -1;
     };
 
     auto future = coro();

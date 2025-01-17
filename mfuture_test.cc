@@ -440,7 +440,7 @@ TEST(DoUntil, pending_failed1) {
 TEST(DoUntil, pending_failed2) {
   int counter = 0;
   Promise<> promise;
-  auto future = DoUntil([&counter]() { return false; },
+  auto future = DoUntil([]() { return false; },
                         [&counter, &promise]() {
                           if (counter == 0) {
                             ++counter;
