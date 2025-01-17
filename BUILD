@@ -51,3 +51,23 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "nfuture_perf",
+    srcs = [
+        "nfuture_perf.cc",
+    ],
+    deps = [
+        ":mfuture",
+        ":nfuture",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "coro_test",
+    srcs = [
+        "coro_test.cc",
+    ],
+)
