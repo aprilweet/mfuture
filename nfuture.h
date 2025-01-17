@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <exception>
@@ -189,6 +190,14 @@ class FutureState {
 
 template <class... T>
 struct ContinuationBase {
+  static inline std::atomic_size_t newed_{0};
+  static inline std::atomic_size_t deleted_{0};
+
+  static std::pair<std::size_t, std::size_t> Count() {
+    return std::make_pair(newed_.load(std::memory_order_relaxed),
+                          deleted_.load(std::memory_order_relaxed));
+  }
+
   FutureState<T...> state_;
 
   virtual ~ContinuationBase() = default;
@@ -208,6 +217,16 @@ struct Continuation : public ContinuationBase<T...> {
   }
 
   Callback callback_;
+
+  void *operator new(std::size_t n) {
+    ContinuationBase<T...>::newed_.fetch_add(1, std::memory_order_relaxed);
+    return ::operator new(n);
+  }
+
+  void operator delete(void *p) {
+    ContinuationBase<T...>::deleted_.fetch_add(1, std::memory_order_relaxed);
+    return ::operator delete(p);
+  }
 };
 
 // Perhaps users also need this function.
@@ -547,7 +566,13 @@ class Promise {
       internal::IsNotReference_v<T...>,
       "Promise's template arguments are NOT allowed to be reference.");
 
+  static inline std::atomic_size_t scheduled_{0};
+
  public:
+  static std::size_t Scheduled() {
+    return scheduled_.load(std::memory_order_relaxed);
+  }
+
   Promise() : p_state_(&state_), future_(nullptr), continuation_(nullptr) {}
 
   Promise(Promise &&other) { MoveFrom(std::move(other)); }
@@ -628,6 +653,8 @@ class Promise {
   }
 
   void Schedule() {
+    scheduled_.fetch_add(1, std::memory_order_relaxed);
+
 #ifdef COROUTINES_ENABLED
     if (auto resumption = std::exchange(resumption_, nullptr)) {
       assert(!continuation_);
@@ -731,7 +758,25 @@ template <typename... T>
 class CPromise {
   Promise<T...> promise_;
 
+  static inline std::atomic_size_t newed_{0};
+  static inline std::atomic_size_t deleted_{0};
+
  public:
+  void *operator new(std::size_t n) {
+    newed_.fetch_add(1, std::memory_order_relaxed);
+    return ::operator new(n);
+  }
+
+  void operator delete(void *p) {
+    deleted_.fetch_add(1, std::memory_order_relaxed);
+    return ::operator delete(p);
+  }
+
+  static std::pair<std::size_t, std::size_t> Count() {
+    return std::make_pair(newed_.load(std::memory_order_relaxed),
+                          deleted_.load(std::memory_order_relaxed));
+  }
+
   static CPromise *Cast(Promise<T...> *promise);
 
   Promise<T...> &Cast() { return promise_; }
@@ -770,7 +815,25 @@ template <>
 class CPromise<> {
   Promise<> promise_;
 
+  static inline std::atomic_size_t newed_{0};
+  static inline std::atomic_size_t deleted_{0};
+
  public:
+  void *operator new(std::size_t n) {
+    newed_.fetch_add(1, std::memory_order_relaxed);
+    return ::operator new(n);
+  }
+
+  void operator delete(void *p) {
+    deleted_.fetch_add(1, std::memory_order_relaxed);
+    return ::operator delete(p);
+  }
+
+  static std::pair<std::size_t, std::size_t> Count() {
+    return std::make_pair(newed_.load(std::memory_order_relaxed),
+                          deleted_.load(std::memory_order_relaxed));
+  }
+
   static CPromise *Cast(Promise<> *promise);
 
   Promise<> &Cast() { return promise_; }
