@@ -27,6 +27,20 @@ cc_library(
     deps = [":traits"],
 )
 
+cc_library(
+    name = "nfuture_utils",
+    hdrs = [
+        "do_with.h",
+        "do_until.h",
+        "latch.h",
+        "semaphore.h",
+        "when_all.h",
+    ],
+    deps = [
+        ":nfuture"
+    ],
+)
+
 cc_test(
     name = "nfuture_test",
     srcs = [
@@ -34,6 +48,7 @@ cc_test(
     ],
     deps = [
         ":nfuture",
+        ":nfuture_utils",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
