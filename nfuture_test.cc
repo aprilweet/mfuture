@@ -1,6 +1,11 @@
-#include "nfuture.h"
-
 #include <iostream>
+
+#include "nfuture.h"
+#include "semaphore.h"
+#include "latch.h"
+#include "do_until.h"
+#include "do_with.h"
+#include "when_all.h"
 
 #include "gtest/gtest.h"
 
@@ -49,8 +54,7 @@ TEST(Future, basic0) {
                       })
                       .ThenWrap([&](Future<bool> &&ft) {
                         EXPECT_TRUE(ft.Failed());
-                        EXPECT_THROW(std::rethrow_exception(ft.Exception()),
-                                     const char *);
+                        EXPECT_THROW(std::rethrow_exception(ft.Exception()), const char *);
                         ++counter;
                         return true;
                       });
@@ -64,31 +68,30 @@ TEST(Future, basic0) {
 TEST(Future, basic1) {
   int counter = 0;
   {
-    auto future =
-        MakeReadyFuture<bool, int>(true, 1)
-            .Then([&](bool val, int &&val2) {
-              EXPECT_TRUE(val);
-              EXPECT_EQ(val2, 1);
-              ++counter;
-              return MakeReadyFuture<int>(1);
-            })
-            .ThenWrap([&](Future<int> ft) {
-              EXPECT_TRUE(ft.Ready());
-              EXPECT_EQ(ft.Value<0>(), 1);
-              ++counter;
-              return MakeExceptionalFuture<int>(std::make_exception_ptr(0.1f));
-            })
-            .Then([&](int val) {
-              // Never reach here.
-              ++counter;
-              return true;
-            })
-            .ThenWrap([&](Future<bool> ft) {
-              EXPECT_TRUE(ft.Failed());
-              EXPECT_THROW(std::rethrow_exception(ft.Exception()), float);
-              ++counter;
-              return true;
-            });
+    auto future = MakeReadyFuture<bool, int>(true, 1)
+                      .Then([&](bool val, int &&val2) {
+                        EXPECT_TRUE(val);
+                        EXPECT_EQ(val2, 1);
+                        ++counter;
+                        return MakeReadyFuture<int>(1);
+                      })
+                      .ThenWrap([&](Future<int> ft) {
+                        EXPECT_TRUE(ft.Ready());
+                        EXPECT_EQ(ft.Value<0>(), 1);
+                        ++counter;
+                        return MakeExceptionalFuture<int>(std::make_exception_ptr(0.1f));
+                      })
+                      .Then([&](int val) {
+                        // Never reach here.
+                        ++counter;
+                        return true;
+                      })
+                      .ThenWrap([&](Future<bool> ft) {
+                        EXPECT_TRUE(ft.Failed());
+                        EXPECT_THROW(std::rethrow_exception(ft.Exception()), float);
+                        ++counter;
+                        return true;
+                      });
     EXPECT_TRUE(future.Ready());
   }
   ASSERT_EQ(counter, 3);
@@ -139,12 +142,11 @@ TEST(Promise, basic1) {
 
 TEST(DoUntil, failed) {
   int counter = 0;
-  auto future =
-      DoUntil([]() { return false; },
-              [&counter]() {
-                ++counter;
-                return MakeExceptionalFuture<>(std::make_exception_ptr("stop"));
-              });
+  auto future = DoUntil([]() { return false; },
+                        [&counter]() {
+                          ++counter;
+                          return MakeExceptionalFuture<>(std::make_exception_ptr("stop"));
+                        });
   EXPECT_TRUE(future.Failed());
   EXPECT_THROW(std::rethrow_exception(future.Exception()), const char *);
   EXPECT_EQ(counter, 1);
@@ -169,17 +171,16 @@ TEST(DoUntil, pending_failed1) {
 TEST(DoUntil, pending_failed2) {
   int counter = 0;
   Promise<> promise;
-  auto future = DoUntil(
-      [&counter]() { return false; },
-      [&counter, &promise]() {
-        if (counter == 0) {
-          ++counter;
-          return promise.GetFuture();
-        } else {
-          ++counter;
-          return MakeExceptionalFuture<>(std::make_exception_ptr("quit"));
-        }
-      });
+  auto future = DoUntil([&counter]() { return false; },
+                        [&counter, &promise]() {
+                          if (counter == 0) {
+                            ++counter;
+                            return promise.GetFuture();
+                          } else {
+                            ++counter;
+                            return MakeExceptionalFuture<>(std::make_exception_ptr("quit"));
+                          }
+                        });
   ASSERT_FALSE(future.Available());
   promise.SetValue();
 
@@ -201,8 +202,7 @@ TEST(perf, mark) {
   {
     auto stop = [n = kTimes]() mutable { return n-- == 0; };
     auto func = [&]() { ++counter; };
-    do_until(std::function([&]() mutable { return stop(); }),
-             std::function([&]() { func(); }));
+    do_until(std::function([&]() mutable { return stop(); }), std::function([&]() { func(); }));
   }
 
   {  // This will be optimized to NOOP.

@@ -44,7 +44,7 @@ static_assert(!IsFuture_v<>);
 static_assert(!IsFuture_v<int>);
 
 template <typename T>
-using Futurized = std::conditional_t<IsFuture_v<T>, T, Future<T>>;
+using Futurized = std::conditional_t<std::is_void_v<T>, Future<>, std::conditional_t<IsFuture_v<T>, T, Future<T>>>;
 
 static_assert(IsFuture_v<Futurized<void>>);
 static_assert(IsFuture_v<Futurized<int>>);
@@ -52,6 +52,7 @@ static_assert(IsFuture_v<Futurized<Future<int>>>);
 
 struct MakeReadyFutureTag {};
 struct MakeExceptionalFutureTag {};
+struct SetValueTag {};
 
 template <class... T>
 class FutureState {
@@ -59,11 +60,9 @@ class FutureState {
   FutureState() = default;
 
   template <class... U>
-  FutureState(MakeReadyFutureTag, U &&...value)
-      : state_(State::kValue), value_(std::forward<U>(value)...) {}
+  FutureState(MakeReadyFutureTag, U &&...value) : state_(State::kValue), value_(std::forward<U>(value)...) {}
 
-  FutureState(MakeExceptionalFutureTag, std::exception_ptr &&exception)
-      : state_(State::kException) {
+  FutureState(MakeExceptionalFutureTag, std::exception_ptr &&exception) : state_(State::kException) {
     new (exception_.data()) std::exception_ptr(std::move(exception));
   }
 
@@ -90,7 +89,7 @@ class FutureState {
     state_ = State::kEmpty;
   }
 
-  void SetValue(std::tuple<T...> &&value) {
+  void SetValue(SetValueTag, std::tuple<T...> &&value) {
     assert(Empty());
     value_ = std::move(value);
     state_ = State::kValue;
@@ -99,14 +98,18 @@ class FutureState {
   template <class... U>
   void SetValue(U &&...value) {
     assert(Empty());
-    value_ = std::make_tuple(std::move(value)...);
+    value_ = std::make_tuple(std::forward<U>(value)...);
     state_ = State::kValue;
   }
 
-  void SetException(std::exception_ptr &&exception) {
+  template <class E>
+  void SetException(E &&exception) {
     assert(Empty());
-
-    new (exception_.data()) std::exception_ptr(std::move(exception));
+    if constexpr (std::is_same_v<internal::RemoveCVRef_t<E>, std::exception_ptr>) {
+      new (exception_.data()) std::exception_ptr(std::move(exception));
+    } else {
+      new (exception_.data()) std::exception_ptr(std::make_exception_ptr(std::forward<E>(exception)));
+    }
     state_ = State::kException;
   }
 
@@ -124,6 +127,11 @@ class FutureState {
     return std::move(value_);
   }
 
+  const std::tuple<T...> &Value() const & {
+    assert(Ready());
+    return value_;
+  }
+
   std::exception_ptr Exception() && {
     assert(Failed());
     auto e = ExceptionRef();
@@ -134,6 +142,11 @@ class FutureState {
 #endif
     state_ = State::kInvalid;
     return e;
+  }
+
+  const std::exception_ptr &Exception() const & {
+    assert(Failed());
+    return ExceptionRef();
   }
 
  private:
@@ -164,12 +177,7 @@ class FutureState {
   FutureState &operator=(const FutureState &) = delete;
 
  private:
-  enum class State {
-    kEmpty,
-    kValue,
-    kException,
-    kInvalid
-  } state_{State::kEmpty};
+  enum class State { kEmpty, kValue, kException, kInvalid } state_{State::kEmpty};
 
   std::tuple<T...> value_;
 
@@ -178,8 +186,7 @@ class FutureState {
   // library, which might prevent compiler to further optimize), so we try to
   // avoid its destruction. Actually after this optimization, compilers are able
   // to archive zero-cost for ready futures.
-  alignas(std::exception_ptr)
-      std::array<std::byte, sizeof(std::exception_ptr)> exception_;
+  alignas(std::exception_ptr) std::array<std::byte, sizeof(std::exception_ptr)> exception_;
 };
 
 template <class... T>
@@ -192,12 +199,10 @@ struct ContinuationBase {
 
 template <class Callback, class... T>
 struct Continuation : public ContinuationBase<T...> {
-  Continuation(Callback &&callback)
-      : callback_(std::forward<Callback>(callback)) {}
+  Continuation(Callback &&callback) : callback_(std::forward<Callback>(callback)) {}
 
   void Run() override {
-    static_assert(
-        std::is_void_v<std::invoke_result_t<Callback, FutureState<T...> &&>>);
+    static_assert(std::is_void_v<std::invoke_result_t<Callback, FutureState<T...> &&>>);
     std::invoke(callback_, std::move(ContinuationBase<T...>::state_));
     delete this;
   }
@@ -205,35 +210,46 @@ struct Continuation : public ContinuationBase<T...> {
   Callback callback_;
 };
 
-// Perhaps users also need this function.
-template <typename FutureType>
-FutureType MakeExceptionalFuture(std::exception_ptr &&exception) {
-  return FutureType(details::MakeExceptionalFutureTag{}, std::move(exception));
+// Perhaps users also need this.
+template <typename FutureType, typename... T>
+FutureType MakeReadyFuture(T &&...val) {
+  return FutureType(details::MakeReadyFutureTag{}, std::forward<T>(val)...);
+}
+
+template <typename FutureType, typename E>
+FutureType MakeExceptionalFuture(E &&exception) {
+  if constexpr (std::is_same_v<internal::RemoveCVRef_t<E>, std::exception_ptr>) {
+    return FutureType(details::MakeExceptionalFutureTag{}, std::move(exception));
+  } else {
+    return FutureType(details::MakeExceptionalFutureTag{}, std::make_exception_ptr(std::forward<E>(exception)));
+  }
 }
 
 template <typename... T>
-void SetContinuation(Future<T...> &future,
-                     ContinuationBase<T...> *continuation) {
+void SetContinuation(Future<T...> &future, ContinuationBase<T...> *continuation) {
   future.SetContinuation(continuation);
 }
 
 }  // namespace details
 
-template <typename Function, typename... Args>
-auto FuturizeInvoke(Function &&f, Args &&...args);
+template <typename Func, typename... Args>
+auto FuturizeInvoke(Func &&func, Args &&...args);
 
-template <typename Function, typename Tuple>
-auto FuturizeApply(Function &&f, Tuple &&t);
+template <typename Func, typename Tuple>
+auto FuturizeApply(Func &&func, Tuple &&t);
 
 template <typename... T, typename... U>
 Future<T...> MakeReadyFuture(U &&...val) {
   return Future<T...>(details::MakeReadyFutureTag{}, std::forward<U>(val)...);
 }
 
-template <typename... T>
-Future<T...> MakeExceptionalFuture(std::exception_ptr &&exception) {
-  return Future<T...>(details::MakeExceptionalFutureTag{},
-                      std::move(exception));
+template <typename... T, typename E>
+Future<T...> MakeExceptionalFuture(E &&exception) {
+  if constexpr (std::is_same_v<internal::RemoveCVRef_t<E>, std::exception_ptr>) {
+    return Future<T...>(details::MakeExceptionalFutureTag{}, std::move(exception));
+  } else {
+    return Future<T...>(details::MakeExceptionalFutureTag{}, std::make_exception_ptr(std::forward<E>(exception)));
+  }
 }
 
 template <class... T>
@@ -242,11 +258,12 @@ class [[nodiscard]] Future {
                 "Future's template arguments are NOT allowed to be void, use "
                 "Future<> instead of Future<void>.");
 
-  static_assert(internal::IsNotReference_v<T...>,
-                "Future's template arguments are NOT allowed to be reference.");
+  static_assert(internal::IsNotReference_v<T...>, "Future's template arguments are NOT allowed to be reference.");
 
  public:
   using PromiseType = Promise<T...>;
+
+  Future() : promise_(nullptr) {}
 
   Future(Future &&other) { MoveFrom(std::move(other)); }
 
@@ -264,15 +281,18 @@ class [[nodiscard]] Future {
     Ignore();
   }
 
+  Promise<T...> GetPromise() {
+    assert(!promise_);
+    return Promise<T...>(this);
+  }
+
   template <class Callback, class R = std::invoke_result_t<Callback, T &&...>>
   auto Then(Callback &&callback) {
     assert(state_.Valid());  // Detect doubly Then.
 
-    using FR =
-        std::conditional_t<std::is_void_v<R>, Future<>, details::Futurized<R>>;
+    using FR = std::conditional_t<std::is_void_v<R>, Future<>, details::Futurized<R>>;
     if (state_.Ready()) {
-      return FuturizeApply(std::forward<Callback>(callback),
-                           std::move(state_).Value());
+      return FuturizeApply(std::forward<Callback>(callback), std::move(state_).Value());
     } else if (state_.Failed()) {
       return details::MakeExceptionalFuture<FR>(std::move(state_).Exception());
     } else {
@@ -281,12 +301,10 @@ class [[nodiscard]] Future {
 
       FR future;
       auto cb = [promise = future.GetPromise(),
-                 callback = std::forward<Callback>(callback)](
-                    details::FutureState<T...> &&state) mutable {
+                 callback = std::forward<Callback>(callback)](details::FutureState<T...> &&state) mutable {
         if (state.Ready()) {
           if constexpr (details::IsFuture_v<R>) {
-            std::apply(callback, std::move(state).Value())
-                .Fold(std::move(promise));
+            std::apply(callback, std::move(state).Value()).Fold(std::move(promise));
           } else if constexpr (std::is_void_v<R>) {
             std::apply(callback, std::move(state).Value());
             promise.SetValue();
@@ -298,21 +316,18 @@ class [[nodiscard]] Future {
           promise.SetException(std::move(state).Exception());
         }
       };
-      auto continuation =
-          new details::Continuation<decltype(cb), T...>(std::move(cb));
+      auto continuation = new details::Continuation<decltype(cb), T...>(std::move(cb));
       SetContinuation(continuation);
 
       return future;  // NRVO?
     }
   }
 
-  template <class Callback,
-            class R = std::invoke_result_t<Callback, Future<T...> &&>>
+  template <class Callback, class R = std::invoke_result_t<Callback, Future<T...> &&>>
   auto ThenWrap(Callback &&callback) {
     assert(state_.Valid());  // Detect doubly Then.
 
-    using FR =
-        std::conditional_t<std::is_void_v<R>, Future<>, details::Futurized<R>>;
+    using FR = std::conditional_t<std::is_void_v<R>, Future<>, details::Futurized<R>>;
     if (state_.Available()) {
       return FuturizeInvoke(std::forward<Callback>(callback), std::move(*this));
     } else {
@@ -321,11 +336,9 @@ class [[nodiscard]] Future {
 
       FR future;
       auto cb = [promise = future.GetPromise(),
-                 callback = std::forward<Callback>(callback)](
-                    details::FutureState<T...> &&state) mutable {
+                 callback = std::forward<Callback>(callback)](details::FutureState<T...> &&state) mutable {
         if constexpr (details::IsFuture_v<R>) {
-          std::invoke(callback, Future(std::move(state)))
-              .Fold(std::move(promise));
+          std::invoke(callback, Future(std::move(state))).Fold(std::move(promise));
         } else if constexpr (std::is_void_v<R>) {
           std::invoke(callback, Future(std::move(state)));
           promise.SetValue();
@@ -334,8 +347,7 @@ class [[nodiscard]] Future {
         }
       };
 
-      auto continuation =
-          new details::Continuation<decltype(cb), T...>(std::move(cb));
+      auto continuation = new details::Continuation<decltype(cb), T...>(std::move(cb));
       SetContinuation(continuation);
 
       return future;  // NRVO?
@@ -368,6 +380,17 @@ class [[nodiscard]] Future {
     return std::move(state_).Exception();  // NRVO?
   }
 
+  void Fold(Promise<T...> &&promise) {
+    if (state_.Ready()) {
+      promise.SetValue(details::SetValueTag{}, std::move(state_).Value());
+    } else if (state_.Failed()) {
+      promise.SetException(std::move(state_).Exception());
+    } else {
+      assert(promise_);
+      *promise_ = std::move(promise);
+    }
+  }
+
   [[gnu::always_inline]] void Ignore() {
     if (state_.Available()) state_.Reset();
   }
@@ -381,33 +404,30 @@ class [[nodiscard]] Future {
   template <typename... U, typename... V>
   friend Future<U...> MakeReadyFuture(V &&...);
 
-  template <typename... U>
-  friend Future<U...> MakeExceptionalFuture(std::exception_ptr &&);
+  template <typename FutureType, typename... V>
+  friend FutureType details::MakeReadyFuture(V &&...);
 
-  template <typename FutureType>
-  friend FutureType details::MakeExceptionalFuture(std::exception_ptr &&);
+  template <typename... U, typename E>
+  friend Future<U...> MakeExceptionalFuture(E &&);
 
-  template <typename... U>
-  friend void details::SetContinuation(Future<U...> &,
-                                       details::ContinuationBase<U...> *);
-
-  Future() : promise_(nullptr) {}
+  template <typename FutureType, typename E>
+  friend FutureType details::MakeExceptionalFuture(E &&);
 
   template <typename... U>
-  Future(details::MakeReadyFutureTag tag, U &&...val)
-      : state_(tag, std::move(val)...), promise_(nullptr) {}
+  friend void details::SetContinuation(Future<U...> &, details::ContinuationBase<U...> *);
+
+  template <typename... U>
+  Future(details::MakeReadyFutureTag tag, U &&...val) : state_(tag, std::forward<U>(val)...), promise_(nullptr) {}
 
   Future(details::MakeExceptionalFutureTag tag, std::exception_ptr &&exception)
       : state_(tag, std::move(exception)), promise_(nullptr) {}
 
-  Future(Promise<T...> *promise)
-      : state_(std::move(*(promise->p_state_))), promise_(promise) {
+  Future(Promise<T...> *promise) : state_(std::move(*(promise->p_state_))), promise_(promise) {
     promise_->p_state_ = &state_;
     promise_->future_ = this;
   }
 
-  Future(details::FutureState<T...> &&state)
-      : state_(std::move(state)), promise_(nullptr) {}
+  Future(details::FutureState<T...> &&state) : state_(std::move(state)), promise_(nullptr) {}
 
   Promise<T...> *Detach() {
     if (promise_) {
@@ -428,23 +448,6 @@ class [[nodiscard]] Future {
     if (promise_) {
       promise_->future_ = this;
       if (promise_->p_state_ == &other.state_) promise_->p_state_ = &state_;
-    }
-  }
-
-  Promise<T...> GetPromise() {
-    assert(!promise_);
-    return Promise<T...>(this);
-  }
-
-  // TODO(monte): Make it public.
-  void Fold(Promise<T...> &&promise) {
-    if (state_.Ready()) {
-      promise.SetValue(std::move(state_).Value());
-    } else if (state_.Failed()) {
-      promise.SetException(std::move(state_).Exception());
-    } else {
-      assert(promise_);
-      *promise_ = std::move(promise);
     }
   }
 
@@ -471,14 +474,21 @@ class Promise {
                 "Promise's template arguments are NOT allowed to be void, use "
                 "Promise<> instead of Future<void>.");
 
-  static_assert(
-      internal::IsNotReference_v<T...>,
-      "Promise's template arguments are NOT allowed to be reference.");
+  static_assert(internal::IsNotReference_v<T...>, "Promise's template arguments are NOT allowed to be reference.");
+
+  static_assert(sizeof...(T) == 0 || internal::IsDefaultConstructible_v<T...>,
+                "Promise's template arguments MUST be empty or default-constructible.");
 
  public:
   Promise() : p_state_(&state_), future_(nullptr), continuation_(nullptr) {}
 
-  Promise(Promise &&other) { MoveFrom(std::move(other)); }
+  Promise(Promise &&other) : p_state_(&state_) { MoveFrom(std::move(other)); }
+
+  Promise &operator=(Promise &&other) {
+    Reset();
+    MoveFrom(std::move(other));
+    return *this;
+  }
 
   ~Promise() { Reset(); }
 
@@ -506,12 +516,17 @@ class Promise {
     }
   }
 
-  void SetException(std::exception_ptr &&exception) {
+  template <class E>
+  void SetException(E &&exception) {
     // In case that the counterpart Future has been destructed, such as the ones
     // returned by Then() abandoned by user.
     if (!p_state_) return;
 
-    p_state_->SetException(std::move(exception));
+    if constexpr (std::is_same_v<internal::RemoveCVRef_t<E>, std::exception_ptr>) {
+      p_state_->SetException(std::move(exception));
+    } else {
+      p_state_->SetException(std::make_exception_ptr(std::forward<E>(exception)));
+    }
 
     // Clear the continuation member before scheduling, because this promise
     // might be destructed before the continuation is done.
@@ -522,23 +537,6 @@ class Promise {
     }
   }
 
- private:
-  friend class Future<T...>;
-
-  Promise(Future<T...> *future)
-      : p_state_(&future->state_), future_(future), continuation_(nullptr) {
-    state_.SetInvalid();
-    future_->promise_ = this;
-  }
-
-  Promise &operator=(Promise &&other) {
-    if (this != &other) {
-      Reset();
-      MoveFrom(std::move(other));
-    }
-    return *this;
-  }
-
   void Reset() {
     assert(!continuation_);
     if (future_) {
@@ -547,6 +545,14 @@ class Promise {
     }
     state_.Reset();
     p_state_ = &state_;
+  }
+
+ private:
+  friend class Future<T...>;
+
+  Promise(Future<T...> *future) : p_state_(&future->state_), future_(future), continuation_(nullptr) {
+    state_.SetInvalid();
+    future_->promise_ = this;
   }
 
   void MoveFrom(Promise &&other) {
@@ -576,103 +582,33 @@ class Promise {
 template <>
 class Promise<void> : public Promise<> {};
 
-template <typename Function, typename... Args>
-auto FuturizeInvoke(Function &&f, Args &&...args) {
-  using R = std::invoke_result_t<Function, decltype(args)...>;
+template <typename Func, typename... Args>
+auto FuturizeInvoke(Func &&func, Args &&...args) {
+  using R = std::invoke_result_t<Func, decltype(args)...>;
   if constexpr (details::IsFuture_v<R>) {
-    return std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
+    return std::invoke(std::forward<Func>(func), std::forward<Args>(args)...);
   } else if constexpr (std::is_void_v<R>) {
-    std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
+    std::invoke(std::forward<Func>(func), std::forward<Args>(args)...);
     return MakeReadyFuture<>();
   } else {
-    auto r =
-        std::invoke(std::forward<Function>(f), std::forward<Args>(args)...);
+    auto r = std::invoke(std::forward<Func>(func), std::forward<Args>(args)...);
     // FIXME(monte): R is a reference type?
     return MakeReadyFuture<R>(std::move(r));
   }
 }
 
-template <typename Function, typename Tuple>
-auto FuturizeApply(Function &&f, Tuple &&t) {
-  using R = internal::ApplyResultType<Function, Tuple>;
+template <typename Func, typename Tuple>
+auto FuturizeApply(Func &&func, Tuple &&t) {
+  using R = internal::ApplyResultType<Func, Tuple>;
   if constexpr (details::IsFuture_v<R>) {
-    return std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
+    return std::apply(std::forward<Func>(func), std::forward<Tuple>(t));
   } else if constexpr (std::is_void_v<R>) {
-    std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
+    std::apply(std::forward<Func>(func), std::forward<Tuple>(t));
     return MakeReadyFuture<>();
   } else {
-    auto r = std::apply(std::forward<Function>(f), std::forward<Tuple>(t));
+    auto r = std::apply(std::forward<Func>(func), std::forward<Tuple>(t));
     return MakeReadyFuture<R>(std::move(r));
   }
-}
-
-namespace details {
-
-template <typename Stop, typename Function>
-struct DoUntilState : public ContinuationBase<> {
-  DoUntilState(Stop &&stop, Function &&function)
-      : stop_(std::forward<Stop>(stop)),
-        function_(std::forward<Function>(function)) {}
-
-  void Run() override {
-    assert(state_.Available());
-    if (state_.Failed()) {
-      promise_.SetException(std::move(state_).Exception());
-      delete this;
-      return;
-    }
-    do {
-      if (stop_()) {
-        promise_.SetValue();
-        state_.Reset();
-        delete this;
-        break;
-      } else {
-        auto future = FuturizeInvoke(function_);
-        if (future.Ready()) {
-        } else if (future.Failed()) {
-          promise_.SetException(future.Exception());
-          state_.Reset();
-          delete this;
-          break;
-        } else {
-          SetContinuation(future, this);
-          break;
-        }
-      }
-    } while (true);
-  }
-
-  Promise<> promise_;
-  Stop stop_;
-  Function function_;
-};
-
-}  // namespace details
-
-template <typename Stop, typename Function>
-Future<> DoUntil(Stop &&stop, Function &&function) {
-  static_assert(std::is_convertible_v<std::invoke_result_t<Stop>, bool>);
-
-  // If Function doesn't return a Future, user should use do-while instead.
-  using R = std::invoke_result_t<Function>;
-  static_assert(std::is_same_v<R, Future<>>);
-
-  do {  // Fast path.
-    if (stop()) return MakeReadyFuture<>();
-    auto future = FuturizeInvoke(function);
-    if (future.Ready())
-      // Never use Then() to drive here to avoid stack overflow.
-      continue;
-    else if (future.Failed())
-      return future;
-    else {
-      auto state = new details::DoUntilState<Stop, Function>(
-          std::forward<Stop>(stop), std::forward<Function>(function));
-      details::SetContinuation(future, state);
-      return state->promise_.GetFuture();
-    }
-  } while (true);
 }
 
 }  // namespace nfuture
