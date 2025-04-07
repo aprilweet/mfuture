@@ -19,6 +19,25 @@ class Promise;
 template <class... T>
 class Future;
 
+struct Task {
+  virtual void Run() = 0;
+  virtual ~Task() = default;
+
+  void Schedule() {
+    if (s_scheduler) {
+      s_scheduler(this);
+    } else {
+      // FIXME(monte): Is it safe to directly run in all cases?
+      Run();
+    }
+  }
+
+  static void SetScheduler(std::function<void(Task*)>&& scheduler) { s_scheduler = std::move(scheduler); }
+
+ private:
+  static inline std::function<void(Task*)> s_scheduler;
+};
+
 namespace details {
 
 struct Tag;  // Is incomplete type OK?
@@ -190,11 +209,8 @@ class FutureState {
 };
 
 template <class... T>
-struct ContinuationBase {
+struct ContinuationBase : public Task {
   FutureState<T...> state_;
-
-  virtual ~ContinuationBase() = default;
-  virtual void Run() = 0;
 };
 
 template <class Callback, class... T>
@@ -511,8 +527,7 @@ class Promise {
     // might be destructed before the continuation is done.
     if (auto continuation = std::exchange(continuation_, nullptr)) {
       p_state_ = nullptr;
-      // TODO(monte): Schedule?
-      continuation->Run();
+      continuation->Schedule();
     }
   }
 
@@ -532,8 +547,7 @@ class Promise {
     // might be destructed before the continuation is done.
     if (auto continuation = std::exchange(continuation_, nullptr)) {
       p_state_ = nullptr;
-      // TODO(monte): Schedule?
-      continuation->Run();
+      continuation->Schedule();
     }
   }
 
