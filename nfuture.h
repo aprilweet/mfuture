@@ -11,7 +11,7 @@
 
 #include "traits.h"
 
-namespace nfuture {
+namespace fabric {
 
 template <class... T>
 class Promise;
@@ -625,4 +625,4 @@ auto FuturizeApply(Func &&func, Tuple &&t) {
   }
 }
 
-}  // namespace nfuture
+}  // namespace fabric

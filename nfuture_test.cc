@@ -9,7 +9,7 @@
 
 #include "gtest/gtest.h"
 
-using namespace nfuture;
+using namespace fabric;
 
 TEST(Future, basic0) {
   int counter = 0;

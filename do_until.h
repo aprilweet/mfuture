@@ -6,7 +6,7 @@
 
 #include "nfuture.h"
 
-namespace nfuture {
+namespace fabric {
 
 namespace details {
 
@@ -104,4 +104,4 @@ Future<> DoForEach(Iterator &&begin, Iterator &&end, Func &&func) {
   }
 }
 
-}  // namespace nfuture
+}  // namespace fabric

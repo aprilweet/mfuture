@@ -9,7 +9,7 @@
 
 #include "nfuture.h"
 
-namespace nfuture {
+namespace fabric {
 
 namespace details {
 
@@ -51,4 +51,4 @@ Future<std::vector<FutureType>> WhenAll(FutureIterator begin, FutureIterator end
   }
 }
 
-}  // namespace nfuture
+}  // namespace fabric

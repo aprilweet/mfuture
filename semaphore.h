@@ -10,7 +10,7 @@
 
 #include "nfuture.h"
 
-namespace nfuture {
+namespace fabric {
 
 class Semaphore {
  public:
@@ -137,4 +137,4 @@ class Semaphore {
   };
 };
 
-}  // namespace nfuture
+}  // namespace fabric

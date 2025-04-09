@@ -9,7 +9,7 @@
 
 #include "gtest/gtest.h"
 
-using namespace nfuture;
+using namespace fabric;
 
 TEST(DoWith, test1) {
   auto obj = std::make_shared<bool>(true);

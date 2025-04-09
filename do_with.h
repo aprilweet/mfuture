@@ -6,7 +6,7 @@
 
 #include "nfuture.h"
 
-namespace nfuture {
+namespace fabric {
 
 namespace details {
 
@@ -57,4 +57,4 @@ auto DoWith(AsyncFunc&& f, Object&& obj, MoreObjects&&... more) {
   return state->promise_.GetFuture();
 }
 
-}
+}  // namespace fabric

@@ -5,7 +5,7 @@
 
 #include "semaphore.h"
 
-namespace nfuture {
+namespace fabric {
 
 class Latch {
   const std::size_t limit_;
@@ -23,4 +23,4 @@ class Latch {
   Future<> Wait() { return semaphore_.Wait(limit_); }
 };
 
-}  // namespace nfuture
+}  // namespace fabric
