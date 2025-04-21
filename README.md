@@ -137,7 +137,7 @@ Future<T...> MakeExceptionalFuture(E &&exception);
 
 ### 5.2. Promise设置结果
 
-通过Promise对象，为其关联的Future（如果存在的话）设置最终状态：`SetValue`设置为Ready，`SetException`设置为Failed。两个接口只能二选一，而且最多调用一次。
+通过Promise对象，为其关联的Future（如果存在的话）设置最终结果：`SetValue`/`SetValueAndSchedule`设置为Ready，`SetException`/`SetExceptionAndSchedule`设置为Failed。四个接口最多调用一次。
 
 ```cpp
 template <class... T>
@@ -145,14 +145,23 @@ class Promise {
   template <class... U>
   void SetValue(U&&... value);
 
+  template <class... U>
+  void SetValueAndSchedule(U&&... value);
+
   template <class E>
   void SetException(E &&exception);
+
+  template <class E>
+  void SetExceptionAndSchedule(E &&exception);
 };
 ```
 
+调用`SetValue`和`SetException`时，如果Continuation已经设置，那么将在当前调用栈中，直接执行Continuation。
+调用`SetValueAndSchedule`和`SetExceptionAndSchedule`时，即使Continuation已经设置，Continuation也并不直接执行，而是调度执行。
+
 ### 5.3. Future设置Continuation
 
-Future作为异步编程基石，关键在于可以设置Continuation，也即在Future完成后的下一步处理流程。
+Future作为异步编程基石，关键在于可以设置Continuation，也即在Future完成后的下一步处理流程。两个接口最多调用一次。
 
 ```cpp
 template <class... T>
@@ -165,26 +174,28 @@ class Future {
 };
 ```
 
-`Then`和`ThenWrap`分别支持两种形式的Continuation，通过其Continuation入参区分，前者为值类型，后者为Future类型。两个接口只能二选一，而且最多调用一次。
+`Then`和`ThenWrap`分别支持两种形式的Continuation，通过其Continuation入参区分，前者为值类型，后者为Future类型。
 前者只在Future为Ready后运行，在Failed下将被跳过；后者在Future完成后始终运行。在不同场景下合理选择使用，可以简化代码。
 
-为了简化使用，规范了Continuation的运行时机有以下两种：
-- 同步执行：调用`Then`或`ThenWrap`时，Future已经完成，则Continuation立刻（在`Then`或`ThenWrap`调用栈中）执行；
-- 调度执行：调用`Then`或`ThenWrap`时，Future还未完成，那么在未来Promise调用`SetValue`或`SetException`时，会经过调度器执行；
+调用`Then`或`ThenWrap`时，如果Future已经完成，那么将在当前调用栈中，直接执行Continuation；否则等到将来Promise设置结果时，再决定如何执行。
 
 #### 5.3.1. Continuation调度器
 
-NFuture支持用户设置Continuation调度器，从而更好地与用户的运行环境结合。
-Continuation继承自`struct Task`，并重写了其纯虚接口`Run`。因此调度器需要在合适时机调用其`Run`执行Continuation。
+NFuture支持用户设置Continuation调度器，从而更好地与运行环境结合。
+Continuation继承自`struct Task`，并重写了其纯虚接口`Run`。NFuture调用`Scheduler::operator()`接口提交一个待运行的Continuation，调度器需要在合适时机调用其`Run`执行Continuation。
 
 ```cpp
 struct Task {
-    static void SetScheduler(std::function<void(Task*)>&& scheduler);
     virtual void Run() = 0;
+};
+
+struct Scheduler {
+  virtual void operator()(Task *task) = 0;
+  static Scheduler *Exchange(Scheduler *scheduler);
 };
 ```
 
-用户通过`SetScheduler`接口可自定义调度器。默认情况下，NFuture会直接运行`Run`执行Continuation。
+用户通过`Scheduler::Exchange`接口可自定义调度器。一般来说，为了满足“调度执行”的要求，调度器需要为异步的。
 
 ### 5.4. Future获取结果
 

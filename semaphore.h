@@ -19,8 +19,7 @@ class Semaphore {
   Semaphore(std::size_t initial, Policy policy = Policy::kFifo)
       : Semaphore(initial, std::numeric_limits<std::size_t>::max(), policy) {}
 
-  Semaphore(std::size_t initial, std::size_t limit, Policy policy = Policy::kFifo)
-      : policy_(policy), limit_(limit) {
+  Semaphore(std::size_t initial, std::size_t limit, Policy policy = Policy::kFifo) : policy_(policy), limit_(limit) {
     if (policy_ == Policy::kFifo) {
       waiters_ = std::make_unique<FifoPolicyStore>(initial);
     } else {
@@ -53,32 +52,32 @@ class Semaphore {
 
     virtual ~PolicyStore() = default;
 
-    std::size_t& Available() { return available_; }
+    std::size_t &Available() { return available_; }
 
     virtual std::size_t Size() const = 0;
     virtual Future<> Wait(std::size_t nr) = 0;
     virtual void Post(std::size_t nr) = 0;
 
-  protected:
+   protected:
     std::size_t available_;
   };
   std::unique_ptr<PolicyStore> waiters_;
 
   struct Waiter {
     Waiter(std::size_t nr) : nr_(nr) {}
-    Waiter(std::size_t nr, Promise<>&& promise) : promise_(std::move(promise)), nr_(nr) {}
+    Waiter(std::size_t nr, Promise<> &&promise) : promise_(std::move(promise)), nr_(nr) {}
 
     mutable Promise<> promise_;
     std::size_t nr_;
 
-    bool operator>(const Waiter& other) const { return nr_ > other.nr_; }
+    bool operator>(const Waiter &other) const { return nr_ > other.nr_; }
   };
 
   struct FifoPolicyStore : public PolicyStore {
     std::deque<Waiter> waiters_;
 
    public:
-    FifoPolicyStore(std::size_t& available) : PolicyStore(available) {}
+    FifoPolicyStore(std::size_t &available) : PolicyStore(available) {}
 
     std::size_t Size() const override { return waiters_.size(); }
 
@@ -87,17 +86,17 @@ class Semaphore {
         available_ -= nr;
         return MakeReadyFuture<>();
       }
-      auto& waiter = waiters_.emplace_back(nr);
+      auto &waiter = waiters_.emplace_back(nr);
       return waiter.promise_.GetFuture();
     }
 
     void Post(std::size_t nr) override {
       while (!waiters_.empty()) {
-        auto& waiter = waiters_.front();
+        auto &waiter = waiters_.front();
         if (available_ < waiter.nr_) break;
 
         available_ -= waiter.nr_;
-        waiter.promise_.SetValue();
+        waiter.promise_.SetValueAndSchedule();
         waiters_.pop_front();
       }
     }
@@ -107,7 +106,7 @@ class Semaphore {
     std::priority_queue<Waiter, std::deque<Waiter>, std::greater<Waiter>> waiters_;
 
    public:
-    FastPolicyStore(std::size_t& available) : PolicyStore(available) {}
+    FastPolicyStore(std::size_t &available) : PolicyStore(available) {}
 
     std::size_t Size() const override { return waiters_.size(); }
 
@@ -126,11 +125,11 @@ class Semaphore {
 
     void Post(std::size_t nr) override {
       while (!waiters_.empty()) {
-        auto& waiter = waiters_.top();
+        auto &waiter = waiters_.top();
         if (available_ < waiter.nr_) break;
 
         available_ -= waiter.nr_;
-        waiter.promise_.SetValue();
+        waiter.promise_.SetValueAndSchedule();
         waiters_.pop();
       }
     }

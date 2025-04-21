@@ -20,22 +20,26 @@ template <class... T>
 class Future;
 
 struct Task {
-  virtual void Run() = 0;
   virtual ~Task() = default;
+  virtual void Run() = 0;
+};
 
-  void Schedule() {
-    if (s_scheduler) {
-      s_scheduler(this);
-    } else {
-      // FIXME(monte): Is it safe to directly run in all cases?
-      Run();
-    }
+// There is a tradeoff whether to schedule the continuation or not. No scheduling reacts more instantly and sometimes
+// achieves better performance. Meanwhile, it makes `SetValue/SetException` impose strong side effects, which may cause
+// unexpected behavior, especially messing up the lifetime of some objects. Thus, NFuture gives the option to the user.
+struct Scheduler {
+  virtual ~Scheduler() = default;
+  virtual void operator()(Task *task) = 0;
+
+  static Scheduler *Exchange(Scheduler *scheduler) { return std::exchange(s_scheduler, scheduler); }
+
+  static void Run(Task *task) {
+    assert(s_scheduler);
+    (*s_scheduler)(task);
   }
 
-  static void SetScheduler(std::function<void(Task*)>&& scheduler) { s_scheduler = std::move(scheduler); }
-
  private:
-  static inline std::function<void(Task*)> s_scheduler;
+  static inline Scheduler *s_scheduler;
 };
 
 namespace details {
@@ -211,6 +215,8 @@ class FutureState {
 template <class... T>
 struct ContinuationBase : public Task {
   FutureState<T...> state_;
+
+  void Schedule() { Scheduler::Run(this); }
 };
 
 template <class Callback, class... T>
@@ -527,14 +533,22 @@ class Promise {
     // might be destructed before the continuation is done.
     if (auto continuation = std::exchange(continuation_, nullptr)) {
       p_state_ = nullptr;
+      continuation->Run();
+    }
+  }
+
+  template <class... U>
+  void SetValueAndSchedule(U &&...value) {
+    if (!p_state_) return;
+    p_state_->SetValue(std::forward<U>(value)...);
+    if (auto continuation = std::exchange(continuation_, nullptr)) {
+      p_state_ = nullptr;
       continuation->Schedule();
     }
   }
 
   template <class E>
   void SetException(E &&exception) {
-    // In case that the counterpart Future has been destructed, such as the ones
-    // returned by Then() abandoned by user.
     if (!p_state_) return;
 
     if constexpr (std::is_same_v<internal::RemoveCVRef_t<E>, std::exception_ptr>) {
@@ -543,8 +557,22 @@ class Promise {
       p_state_->SetException(std::make_exception_ptr(std::forward<E>(exception)));
     }
 
-    // Clear the continuation member before scheduling, because this promise
-    // might be destructed before the continuation is done.
+    if (auto continuation = std::exchange(continuation_, nullptr)) {
+      p_state_ = nullptr;
+      continuation->Run();
+    }
+  }
+
+  template <class E>
+  void SetExceptionAndSchedule(E &&exception) {
+    if (!p_state_) return;
+
+    if constexpr (std::is_same_v<internal::RemoveCVRef_t<E>, std::exception_ptr>) {
+      p_state_->SetException(std::move(exception));
+    } else {
+      p_state_->SetException(std::make_exception_ptr(std::forward<E>(exception)));
+    }
+
     if (auto continuation = std::exchange(continuation_, nullptr)) {
       p_state_ = nullptr;
       continuation->Schedule();
