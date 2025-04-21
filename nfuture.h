@@ -212,6 +212,18 @@ class FutureState {
   alignas(std::exception_ptr) std::array<std::byte, sizeof(std::exception_ptr)> exception_;
 };
 
+struct Allocator {
+  virtual ~Allocator() = default;
+  virtual void *Allocate(size_t size) = 0;
+  virtual void Deallocate(void *ptr) = 0;
+
+  static Allocator *Exchange(Allocator *allocator) { return std::exchange(s_allocator, allocator); }
+  static Allocator *Get() { return s_allocator; }
+
+ private:
+  static inline Allocator *s_allocator;
+};
+
 template <class... T>
 struct ContinuationBase : public Task {
   FutureState<T...> state_;
@@ -222,6 +234,22 @@ struct ContinuationBase : public Task {
 template <class Callback, class... T>
 struct Continuation : public ContinuationBase<T...> {
   Continuation(Callback &&callback) : callback_(std::forward<Callback>(callback)) {}
+
+  static void *operator new(std::size_t size) {
+    if (auto alloc = Allocator::Get()) {
+      return alloc->Allocate(size);
+    } else {
+      return ::operator new(size);
+    }
+  }
+
+  static void operator delete(void *ptr) {
+    if (auto alloc = Allocator::Get()) {
+      alloc->Deallocate(ptr);
+    } else {
+      ::operator delete(ptr);
+    }
+  }
 
   void Run() override {
     static_assert(std::is_void_v<std::invoke_result_t<Callback, FutureState<T...> &&>>);
