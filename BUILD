@@ -7,6 +7,7 @@ cc_library(
     name = "nfuture",
     hdrs = ["nfuture.h"],
     deps = [":traits"],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
